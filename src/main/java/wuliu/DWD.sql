@@ -1,9 +1,5 @@
-set hive.exec.parallel=true; -- 允许并行执行UNION等操作
-set hive.exec.parallel.thread.number=2; -- 并行线程数
-set hive.exec.dynamic.partition.mode=nonstrict;
-set hive.exec.mode.local.auto=true;
-use tms01;
-
+set hive.exec.mode.local.auto=True;
+use tms;
 drop table if exists dwd_trade_order_detail_inc;
 create external table dwd_trade_order_detail_inc(
       `id` bigint comment '运单明细ID',
@@ -34,17 +30,16 @@ create external table dwd_trade_order_detail_inc(
       `cargo_num` bigint COMMENT '货物个数',
       `amount` decimal(16,2) COMMENT '金额',
       `estimate_arrive_time` string COMMENT '预计到达时间',
-      `distance` decimal(16,2) COMMENT '距离，单位：公里'
+      `distance` decimal(16,2) COMMENT '距离，单位：公里',
+      `ts` bigint COMMENT '时间戳'
 ) comment '交易域订单明细事务事实表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dwd/dwd_trade_order_detail_inc'
+location '/warehouse/tms/dwd/dwd_trade_order_detail_inc'
 tblproperties('orc.compress' = 'snappy');
-
-
 set hive.exec.dynamic.partition.mode=nonstrict;
 insert overwrite table dwd_trade_order_detail_inc
-    partition (ds)
+    partition (ds="20250720")
 select cargo.id,
        order_id,
        cargo_type,
@@ -82,10 +77,10 @@ from (select after.id,
              after.volume_width,
              after.volume_height,
              after.weight,
-             concat(substr(after.create_time, 1, 10), ' ', substr(after.create_time, 12, 8)) order_time
-      from ods_order_cargo after
-      where ds = '20250718'
-        and after.is_deleted = '0') cargo
+             concat(substr(after.create_time, 1, 10), ' ', substr(after.create_time, 12, 8)) order_time,
+             ds
+      from ods_order_cargo as after
+      where  is_deleted = '0') cargo
          join
      (select after.id,
              after.order_no,
@@ -108,33 +103,27 @@ from (select after.id,
                                  cast(after.estimate_arrive_time as bigint), 'UTC'),
                          'yyyy-MM-dd HH:mm:ss')             estimate_arrive_time,
              after.distance
-      from ods_order_info after
-      where ds = '20250718'
-        and after.is_deleted = '0') info
+      from ods_order_info as after
+      where  after.is_deleted = '0') info
      on cargo.order_id = info.id
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_cargo_type
+      where is_deleted = '0') dic_for_cargo_type
      on cargo.cargo_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_status
+      where  is_deleted = '0') dic_for_status
      on info.status = cast(dic_for_status.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_collect_type
+      where  is_deleted = '0') dic_for_collect_type
      on info.collect_type = cast(dic_for_cargo_type.id as string);
-
-select * from dwd_trade_order_detail_inc;
 
 
 drop table if exists dwd_trade_pay_suc_detail_inc;
@@ -169,17 +158,16 @@ create external table dwd_trade_pay_suc_detail_inc(
       `cargo_num` bigint COMMENT '货物个数',
       `amount` decimal(16,2) COMMENT '金额',
       `estimate_arrive_time` string COMMENT '预计到达时间',
-      `distance` decimal(16,2) COMMENT '距离，单位：公里'
+      `distance` decimal(16,2) COMMENT '距离，单位：公里',
+      `ts` bigint COMMENT '时间戳'
 ) comment '交易域支付成功事务事实表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dwd/dwd_trade_pay_suc_detail_inc'
+location '/warehouse/tms/dwd/dwd_trade_pay_suc_detail_inc'
 tblproperties('orc.compress' = 'snappy');
-
-
 set hive.exec.dynamic.partition.mode=nonstrict;
 insert overwrite table dwd_trade_pay_suc_detail_inc
-    partition (ds)
+    partition (ds="20250720")
 select cargo.id,
        order_id,
        cargo_type,
@@ -218,10 +206,10 @@ from (select after.id,
              after.volume_length,
              after.volume_width,
              after.volume_height,
-             after.weight
-      from ods_order_cargo after
-      where ds = '20250718'
-        and after.is_deleted = '0') cargo
+             after.weight,
+             ds
+      from ods_order_cargo as after
+      where  after.is_deleted = '0') cargo
          join
      (select after.id,
              after.order_no,
@@ -232,58 +220,45 @@ from (select after.id,
              after.receiver_province_id,
              after.receiver_city_id,
              after.receiver_district_id,
-             concat(substr(after.receiver_name, 1, 1), '*')                                  receiver_name,
+             concat(substr(after.receiver_name, 1, 1), '*') receiver_name,
              after.sender_complex_id,
              after.sender_province_id,
              after.sender_city_id,
              after.sender_district_id,
-             concat(substr(after.sender_name, 1, 1), '*')                                    sender_name,
+             concat(substr(after.sender_name, 1, 1), '*') sender_name,
              after.payment_type,
              after.cargo_num,
              after.amount,
-             date_format(from_utc_timestamp(
-                                 cast(after.estimate_arrive_time as bigint), 'UTC'),
-                         'yyyy-MM-dd HH:mm:ss')                                              estimate_arrive_time,
+             date_format(from_utc_timestamp(cast(after.estimate_arrive_time as bigint), 'UTC'),'yyyy-MM-dd HH:mm:ss')                                              estimate_arrive_time,
              after.distance,
              concat(substr(after.update_time, 1, 10), ' ', substr(after.update_time, 12, 8)) payment_time
-      from ods_order_info after
-      where ds = '20250718'
-        and after.is_deleted = '0'
-        and after.status <> '60010'
-        and after.status <> '60999') info
+      from ods_order_info as after
+     ) info
      on cargo.order_id = info.id
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_cargo_type
+      where  is_deleted = '0') dic_for_cargo_type
      on cargo.cargo_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_status
+      where is_deleted = '0') dic_for_status
      on info.status = cast(dic_for_status.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_collect_type
+      where  is_deleted = '0') dic_for_collect_type
      on info.collect_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_payment_type
+      where  is_deleted = '0') dic_for_payment_type
      on info.payment_type = cast(dic_for_payment_type.id as string);
-
-
-select * from dwd_trade_pay_suc_detail_inc;
-
 
 
 drop table if exists dwd_trade_order_cancel_detail_inc;
@@ -316,17 +291,16 @@ create external table dwd_trade_order_cancel_detail_inc(
       `cargo_num` bigint COMMENT '货物个数',
       `amount` decimal(16,2) COMMENT '金额',
       `estimate_arrive_time` string COMMENT '预计到达时间',
-      `distance` decimal(16,2) COMMENT '距离，单位：公里'
+      `distance` decimal(16,2) COMMENT '距离，单位：公里',
+      `ts` bigint COMMENT '时间戳'
 ) comment '交易域取消运单事务事实表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dwd/dwd_trade_order_cancel_detail_inc'
+location '/warehouse/tms/dwd/dwd_trade_order_cancel_detail_inc'
 tblproperties('orc.compress' = 'snappy');
-
-
 set hive.exec.dynamic.partition.mode=nonstrict;
 insert overwrite table dwd_trade_order_cancel_detail_inc
-    partition (ds)
+    partition (ds="20250720")
 select cargo.id,
        order_id,
        cargo_type,
@@ -363,10 +337,10 @@ from (select after.id,
              after.volume_length,
              after.volume_width,
              after.volume_height,
-             after.weight
-      from ods_order_cargo after
-      where ds = '20250718'
-        and after.is_deleted = '0') cargo
+             after.weight,
+             ds
+      from ods_order_cargo as after
+      where  after.is_deleted = '0') cargo
          join
      (select after.id,
              after.order_no,
@@ -377,48 +351,38 @@ from (select after.id,
              after.receiver_province_id,
              after.receiver_city_id,
              after.receiver_district_id,
-             concat(substr(after.receiver_name, 1, 1), '*')                                  receiver_name,
+             concat(substr(after.receiver_name, 1, 1), '*') receiver_name,
              after.sender_complex_id,
              after.sender_province_id,
              after.sender_city_id,
              after.sender_district_id,
-             concat(substr(after.sender_name, 1, 1), '*')                                    sender_name,
+             concat(substr(after.sender_name, 1, 1), '*') sender_name,
              after.cargo_num,
              after.amount,
-             date_format(from_utc_timestamp(
-                                 cast(after.estimate_arrive_time as bigint), 'UTC'),
-                         'yyyy-MM-dd HH:mm:ss')                                              estimate_arrive_time,
+             date_format(from_utc_timestamp(cast(after.estimate_arrive_time as bigint), 'UTC'),'yyyy-MM-dd HH:mm:ss') estimate_arrive_time,
              after.distance,
              concat(substr(after.update_time, 1, 10), ' ', substr(after.update_time, 12, 8)) cancel_time
-      from ods_order_info after
-      where ds = '20250718'
-        and after.is_deleted = '0'
-        and after.status = '60020') info
+      from ods_order_info as after
+     ) info
      on cargo.order_id = info.id
          left join
      (select id,
              name
-      from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_cargo_type
+      from ods_base_dic as atfer
+      where  is_deleted = '0') dic_for_cargo_type
      on cargo.cargo_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_status
+      where  is_deleted = '0') dic_for_status
      on info.status = cast(dic_for_status.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_collect_type
+      where  is_deleted = '0') dic_for_collect_type
      on info.collect_type = cast(dic_for_cargo_type.id as string);
-
-select * from dwd_trade_order_cancel_detail_inc;
-
 
 
 
@@ -454,18 +418,16 @@ create external table dwd_trans_receive_detail_inc(
       `cargo_num` bigint COMMENT '货物个数',
       `amount` decimal(16,2) COMMENT '金额',
       `estimate_arrive_time` string COMMENT '预计到达时间',
-      `distance` decimal(16,2) COMMENT '距离，单位：公里'
+      `distance` decimal(16,2) COMMENT '距离，单位：公里',
+      `ts` bigint COMMENT '时间戳'
 ) comment '物流域揽收事务事实表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dwd/dwd_trans_receive_detail_inc'
+location '/warehouse/tms/dwd/dwd_trans_receive_detail_inc'
 tblproperties('orc.compress' = 'snappy');
-
-
-
 set hive.exec.dynamic.partition.mode=nonstrict;
 insert overwrite table dwd_trans_receive_detail_inc
-    partition (ds)
+    partition (ds="20250720")
 select cargo.id,
        order_id,
        cargo_type,
@@ -504,10 +466,10 @@ from (select after.id,
              after.volume_length,
              after.volume_width,
              after.volume_height,
-             after.weight
-      from ods_order_cargo after
-      where ds = '20250718'
-        and after.is_deleted = '0') cargo
+             after.weight,
+             ds
+      from ods_order_cargo as after
+      where  after.is_deleted = '0') cargo
          join
      (select after.id,
              after.order_no,
@@ -518,59 +480,45 @@ from (select after.id,
              after.receiver_province_id,
              after.receiver_city_id,
              after.receiver_district_id,
-             concat(substr(after.receiver_name, 1, 1), '*')                                  receiver_name,
+             concat(substr(after.receiver_name, 1, 1), '*') receiver_name,
              after.sender_complex_id,
              after.sender_province_id,
              after.sender_city_id,
              after.sender_district_id,
-             concat(substr(after.sender_name, 1, 1), '*')                                    sender_name,
+             concat(substr(after.sender_name, 1, 1), '*') sender_name,
              after.payment_type,
              after.cargo_num,
              after.amount,
-             date_format(from_utc_timestamp(
-                                 cast(after.estimate_arrive_time as bigint), 'UTC'),
-                         'yyyy-MM-dd HH:mm:ss')                                              estimate_arrive_time,
+             date_format(from_utc_timestamp(cast(after.estimate_arrive_time as bigint), 'UTC'),'yyyy-MM-dd HH:mm:ss')                                              estimate_arrive_time,
              after.distance,
              concat(substr(after.update_time, 1, 10), ' ', substr(after.update_time, 12, 8)) receive_time
-      from ods_order_info after
-      where ds = '20250718'
-        and after.is_deleted = '0'
-        and after.status <> '60010'
-        and after.status <> '60020'
-        and after.status <> '60999') info
+      from ods_order_info as after
+     ) info
      on cargo.order_id = info.id
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_cargo_type
+      where is_deleted = '0') dic_for_cargo_type
      on cargo.cargo_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_status
+      where  is_deleted = '0') dic_for_status
      on info.status = cast(dic_for_status.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_collect_type
+      where  is_deleted = '0') dic_for_collect_type
      on info.collect_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_payment_type
+      where is_deleted = '0') dic_for_payment_type
      on info.payment_type = cast(dic_for_payment_type.id as string);
-
-
-select * from dwd_trans_receive_detail_inc;
-
 
 
 drop table if exists dwd_trans_dispatch_detail_inc;
@@ -605,17 +553,16 @@ create external table dwd_trans_dispatch_detail_inc(
       `cargo_num` bigint COMMENT '货物个数',
       `amount` decimal(16,2) COMMENT '金额',
       `estimate_arrive_time` string COMMENT '预计到达时间',
-      `distance` decimal(16,2) COMMENT '距离，单位：公里'
+      `distance` decimal(16,2) COMMENT '距离，单位：公里',
+      `ts` bigint COMMENT '时间戳'
 ) comment '物流域发单事务事实表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dwd/dwd_trans_dispatch_detail_inc'
+location '/warehouse/tms/dwd/dwd_trans_dispatch_detail_inc'
 tblproperties('orc.compress' = 'snappy');
-
-
 set hive.exec.dynamic.partition.mode=nonstrict;
 insert overwrite table dwd_trans_dispatch_detail_inc
-    partition (ds)
+    partition (ds="20250720")
 select cargo.id,
        order_id,
        cargo_type,
@@ -654,10 +601,10 @@ from (select after.id,
              after.volume_length,
              after.volume_width,
              after.volume_height,
-             after.weight
-      from ods_order_cargo after
-      where ds = '20250718'
-        and after.is_deleted = '0') cargo
+             after.weight,
+             ds
+      from ods_order_cargo as after
+      where  after.is_deleted = '0') cargo
          join
      (select after.id,
              after.order_no,
@@ -682,46 +629,33 @@ from (select after.id,
                          'yyyy-MM-dd HH:mm:ss')                                              estimate_arrive_time,
              after.distance,
              concat(substr(after.update_time, 1, 10), ' ', substr(after.update_time, 12, 8)) dispatch_time
-      from ods_order_info after
-      where ds = '20250718'
-        and after.is_deleted = '0'
-        and after.status <> '60010'
-        and after.status <> '60020'
-        and after.status <> '60030'
-        and after.status <> '60040'
-        and after.status <> '60999') info
+      from ods_order_info as after
+     ) info
      on cargo.order_id = info.id
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_cargo_type
+      where  is_deleted = '0') dic_for_cargo_type
      on cargo.cargo_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_status
+      where  is_deleted = '0') dic_for_status
      on info.status = cast(dic_for_status.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_collect_type
+      where  is_deleted = '0') dic_for_collect_type
      on info.collect_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_payment_type
+      where  is_deleted = '0') dic_for_payment_type
      on info.payment_type = cast(dic_for_payment_type.id as string);
-
-select * from dwd_trans_dispatch_detail_inc;
-
 
 
 drop table if exists dwd_trans_bound_finish_detail_inc;
@@ -756,16 +690,16 @@ create external table dwd_trans_bound_finish_detail_inc(
       `cargo_num` bigint COMMENT '货物个数',
       `amount` decimal(16,2) COMMENT '金额',
       `estimate_arrive_time` string COMMENT '预计到达时间',
-      `distance` decimal(16,2) COMMENT '距离，单位：公里'
+      `distance` decimal(16,2) COMMENT '距离，单位：公里',
+      `ts` bigint COMMENT '时间戳'
 ) comment '物流域转运完成事务事实表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dwd/dwd_trans_bound_finish_detail_inc'
+location '/warehouse/tms/dwd/dwd_trans_bound_finish_detail_inc'
 tblproperties('orc.compress' = 'snappy');
-
-
 set hive.exec.dynamic.partition.mode=nonstrict;
-insert overwrite table dwd_trans_bound_finish_detail_inc partition (ds)
+insert overwrite table dwd_trans_bound_finish_detail_inc
+    partition (ds="20250720")
 select cargo.id,
        order_id,
        cargo_type,
@@ -804,10 +738,10 @@ from (select after.id,
              after.volume_length,
              after.volume_width,
              after.volume_height,
-             after.weight
-      from ods_order_cargo after
-      where ds = '20250718'
-        and after.is_deleted = '0') cargo
+             after.weight,
+             ds
+      from ods_order_cargo as after
+      where  after.is_deleted = '0') cargo
          join
      (select after.id,
              after.order_no,
@@ -832,46 +766,34 @@ from (select after.id,
                          'yyyy-MM-dd HH:mm:ss')                                              estimate_arrive_time,
              after.distance,
              concat(substr(after.update_time, 1, 10), ' ', substr(after.update_time, 12, 8)) bound_finish_time
-      from ods_order_info after
-      where ds = '20250718'
-        and after.is_deleted = '0'
-        and after.status <> '60020'
-        and after.status <> '60030'
-        and after.status <> '60040'
-        and after.status <> '60050') info
+      from ods_order_info  as after
+     ) info
      on cargo.order_id = info.id
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_cargo_type
+      where is_deleted = '0') dic_for_cargo_type
+     on cargo.cargo_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_status
+      where  is_deleted = '0') dic_for_status
+     on info.status = cast(dic_for_status.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_collect_type
+      where  is_deleted = '0') dic_for_collect_type
+     on info.collect_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_payment_type;
+      where  is_deleted = '0') dic_for_payment_type
+     on info.payment_type = cast(dic_for_payment_type.id as string);
 
-select * from dwd_trans_bound_finish_detail_inc;
-
-
-
-
-
--- 物流域派送成功事务事实表
 
 drop table if exists dwd_trans_deliver_suc_detail_inc;
 create external table dwd_trans_deliver_suc_detail_inc(
@@ -905,23 +827,16 @@ create external table dwd_trans_deliver_suc_detail_inc(
       `cargo_num` bigint COMMENT '货物个数',
       `amount` decimal(16,2) COMMENT '金额',
       `estimate_arrive_time` string COMMENT '预计到达时间',
-      `distance` decimal(16,2) COMMENT '距离，单位：公里'
+      `distance` decimal(16,2) COMMENT '距离，单位：公里',
+      `ts` bigint COMMENT '时间戳'
 ) comment '物流域派送成功事务事实表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dwd/dwd_trans_deliver_suc_detail_inc'
+location '/warehouse/tms/dwd/dwd_trans_deliver_suc_detail_inc'
 tblproperties('orc.compress' = 'snappy');
-
-
-
-set hive.exec.dynamic.partition.mode=nonstrict;
-
-
-
-
 set hive.exec.dynamic.partition.mode=nonstrict;
 insert overwrite table dwd_trans_deliver_suc_detail_inc
-    partition (ds)
+    partition (ds="20250720")
 select cargo.id,
        order_id,
        cargo_type,
@@ -960,10 +875,10 @@ from (select after.id,
              after.volume_length,
              after.volume_width,
              after.volume_height,
-             after.weight
-      from ods_order_cargo after
-      where ds = '20250718'
-        and after.is_deleted = '0') cargo
+             after.weight,
+             ds
+      from ods_order_cargo as after
+      where  after.is_deleted = '0') cargo
          join
      (select after.id,
              after.order_no,
@@ -988,42 +903,35 @@ from (select after.id,
                          'yyyy-MM-dd HH:mm:ss')                                              estimate_arrive_time,
              after.distance,
              concat(substr(after.update_time, 1, 10), ' ', substr(after.update_time, 12, 8)) deliver_suc_time
-      from ods_order_info after
-      where ds = '20250718'
-        and after.is_deleted = '0'
-        and after.status <> '60020'
-        and after.status <> '60030'
-        and after.status <> '60040') info
+      from ods_order_info as after
+     ) info
      on cargo.order_id = info.id
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_cargo_type
+      where  is_deleted = '0') dic_for_cargo_type
+     on cargo.cargo_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_status
+      where  is_deleted = '0') dic_for_status
+     on info.status = cast(dic_for_status.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_collect_type
+      where  is_deleted = '0') dic_for_collect_type
+     on info.collect_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_payment_type;
-
-select * from dwd_trans_deliver_suc_detail_inc;
+      where  is_deleted = '0') dic_for_payment_type
+     on info.payment_type = cast(dic_for_payment_type.id as string);
 
 
--- 物流域签收事务事实表
 drop table if exists dwd_trans_sign_detail_inc;
 create external table dwd_trans_sign_detail_inc(
       `id` bigint comment '运单明细ID',
@@ -1056,16 +964,16 @@ create external table dwd_trans_sign_detail_inc(
       `cargo_num` bigint COMMENT '货物个数',
       `amount` decimal(16,2) COMMENT '金额',
       `estimate_arrive_time` string COMMENT '预计到达时间',
-      `distance` decimal(16,2) COMMENT '距离，单位：公里'
+      `distance` decimal(16,2) COMMENT '距离，单位：公里',
+      `ts` bigint COMMENT '时间戳'
 ) comment '物流域签收事务事实表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dwd/dwd_trans_sign_detail_inc'
+location '/warehouse/tms/dwd/dwd_trans_sign_detail_inc'
 tblproperties('orc.compress' = 'snappy');
-
 set hive.exec.dynamic.partition.mode=nonstrict;
 insert overwrite table dwd_trans_sign_detail_inc
-    partition (ds)
+    partition (ds="20250720")
 select cargo.id,
        order_id,
        cargo_type,
@@ -1104,10 +1012,10 @@ from (select after.id,
              after.volume_length,
              after.volume_width,
              after.volume_height,
-             after.weight
-      from ods_order_cargo after
-      where ds = '20250718'
-        and after.is_deleted = '0') cargo
+             after.weight,
+             ds
+      from ods_order_cargo as after
+      where  after.is_deleted = '0') cargo
          join
      (select after.id,
              after.order_no,
@@ -1132,44 +1040,33 @@ from (select after.id,
                          'yyyy-MM-dd HH:mm:ss')                                              estimate_arrive_time,
              after.distance,
              concat(substr(after.update_time, 1, 10), ' ', substr(after.update_time, 12, 8)) sign_time
-      from ods_order_info after
-      where ds = '20250718'
-        and after.is_deleted = '0'
-        and after.status <> '60020'
-        and after.status <> '60030'
-        and after.status <> '60040'
-        and after.status <> '60050') info
+      from ods_order_info as after
+     ) info
      on cargo.order_id = info.id
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_cargo_type
+      where  is_deleted = '0') dic_for_cargo_type
      on cargo.cargo_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_status
+      where  is_deleted = '0') dic_for_status
      on info.status = cast(dic_for_status.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_collect_type
+      where is_deleted = '0') dic_for_collect_type
      on info.collect_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_payment_type
+      where  is_deleted = '0') dic_for_payment_type
      on info.payment_type = cast(dic_for_payment_type.id as string);
-
-select * from dwd_trans_sign_detail_inc;
 
 
 drop table if exists dwd_trade_order_process_inc;
@@ -1205,15 +1102,14 @@ create external table dwd_trade_order_process_inc(
       `amount` decimal(16,2) COMMENT '金额',
       `estimate_arrive_time` string COMMENT '预计到达时间',
       `distance` decimal(16,2) COMMENT '距离，单位：公里',
+      `ts` bigint COMMENT '时间戳',
       `start_date` string COMMENT '开始日期',
       `end_date` string COMMENT '结束日期'
 ) comment '交易域运单累积快照事实表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dwd/dwd_order_process'
+location '/warehouse/tms/dwd/dwd_order_process'
 tblproperties('orc.compress' = 'snappy');
-
-
 set hive.exec.dynamic.partition.mode=nonstrict;
 insert overwrite table dwd_trade_order_process_inc
     partition (ds)
@@ -1248,6 +1144,7 @@ select cargo.id,
        amount,
        estimate_arrive_time,
        distance,
+       ds,
        date_format(order_time, 'yyyy-MM-dd') start_date,
        end_date,
        end_date                              ds
@@ -1258,10 +1155,10 @@ from (select after.id,
              after.volume_width,
              after.volume_height,
              after.weight,
-             concat(substr(after.create_time, 1, 10), ' ', substr(after.create_time, 12, 8)) order_time
-      from ods_order_cargo after
-      where ds = '20250718'
-        and after.is_deleted = '0') cargo
+             concat(substr(after.create_time, 1, 10), ' ', substr(after.create_time, 12, 8)) order_time,
+             ds
+      from ods_order_cargo as after
+      where  after.is_deleted = '0') cargo
          join
      (select after.id,
              after.order_no,
@@ -1285,46 +1182,37 @@ from (select after.id,
                                  cast(after.estimate_arrive_time as bigint), 'UTC'),
                          'yyyy-MM-dd HH:mm:ss')             estimate_arrive_time,
              after.distance,
-             if(after.status = '60020' or
-                after.status = '60030',
+             if(after.status = '60080' or
+                after.status = '60999',
                 concat(substr(after.update_time, 1, 10)),
                 '9999-12-31')                               end_date
-      from ods_order_info after
-      where ds = '20250718'
-        and after.is_deleted = '0') info
+      from ods_order_info as after
+      where  after.is_deleted = '0') info
      on cargo.order_id = info.id
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_cargo_type
+      where  is_deleted = '0') dic_for_cargo_type
      on cargo.cargo_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_status
+      where  is_deleted = '0') dic_for_status
      on info.status = cast(dic_for_status.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_collect_type
+      where  is_deleted = '0') dic_for_collect_type
      on info.collect_type = cast(dic_for_cargo_type.id as string)
          left join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_payment_type
+      where  is_deleted = '0') dic_for_payment_type
      on info.payment_type = cast(dic_for_payment_type.id as string);
-
-
-
-select * from dwd_trade_order_process_inc;
 
 
 drop table if exists dwd_trans_trans_finish_inc;
@@ -1345,18 +1233,18 @@ create external table dwd_trans_trans_finish_inc(
       `truck_no` string COMMENT '卡车号牌',
       `actual_start_time` string COMMENT '实际启动时间',
       `actual_end_time` string COMMENT '实际到达时间',
+      `estimate_end_time` string COMMENT '预估到达时间',
       `actual_distance` decimal(16,2) COMMENT '实际行驶距离',
-      `finish_dur_sec` bigint COMMENT '运输完成历经时长：秒'
+      `finish_dur_sec` bigint COMMENT '运输完成历经时长：秒',
+      `ts` bigint COMMENT '时间戳'
 ) comment '物流域运输事务事实表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dwd/dwd_trans_trans_finish_inc'
+location '/warehouse/tms/dwd/dwd_trans_trans_finish_inc'
 tblproperties('orc.compress' = 'snappy');
-
-
-
+set hive.exec.dynamic.partition.mode=nonstrict;
 insert overwrite table dwd_trans_trans_finish_inc
-    partition (ds = '20250712')
+    partition (ds)
 select info.id,
        shift_id,
        line_id,
@@ -1373,8 +1261,11 @@ select info.id,
        truck_no,
        actual_start_time,
        actual_end_time,
+       estimated_time ,
        actual_distance,
-       finish_dur_sec
+       finish_dur_sec,
+       '20250720',
+       '20250720'
 from (select after.id,
              after.shift_id,
              after.line_id,
@@ -1395,27 +1286,20 @@ from (select after.id,
              date_format(from_utc_timestamp(
                                  cast(after.actual_end_time as bigint), 'UTC'),
                          'yyyy-MM-dd HH:mm:ss')                                                       actual_end_time,
+
              after.actual_distance,
-             (cast(after.actual_end_time as bigint) - cast(after.actual_start_time as bigint)) / 1000 finish_dur_sec
+             (cast(after.actual_end_time as bigint) - cast(after.actual_start_time as bigint)) / 1000 finish_dur_sec,
+             date_format(from_utc_timestamp(
+                                 cast(after.actual_end_time as bigint), 'UTC'),
+                         'yyyy-MM-dd')                                                                ds
       from ods_transport_task after
-      where ds = '20250718'
-        and after.actual_end_time is not null
-        and after.is_deleted = '0') info
+     ) info
          left join
-     (select id
+     (select id,
+             estimated_time
       from dim_shift_full
-      where ds = '20250712') dim_tb
-     on info.shift_id = dim_tb.id;
-
-
-
-
-
-
-
-
-
-select * from dwd_trans_trans_finish_inc;
+     ) dim_tb
+     on info.shift_id = dim_tb.id limit 200;
 
 
 drop table if exists dwd_bound_inbound_inc;
@@ -1428,27 +1312,11 @@ create external table dwd_bound_inbound_inc(
 ) comment '中转域入库事务事实表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dwd/dwd_bound_inbound_inc'
+location '/warehouse/tms/dwd/dwd_bound_inbound_inc'
 tblproperties('orc.compress' = 'snappy');
-
 set hive.exec.dynamic.partition.mode=nonstrict;
 insert overwrite table dwd_bound_inbound_inc
-    partition (ds)
-select after.id,
-       after.order_id,
-       after.org_id,
-       date_format(from_utc_timestamp(
-                           cast(after.inbound_time as bigint), 'UTC'),
-                   'yyyy-MM-dd HH:mm:ss') inbound_time,
-       after.inbound_emp_id,
-       date_format(from_utc_timestamp(
-                           cast(after.inbound_time as bigint), 'UTC'),
-                   'yyyy-MM-dd')          ds
-from ods_order_org_bound after
-where ds = '20250718';
-
-insert overwrite table dwd_bound_inbound_inc
-    partition (ds = '20250718')
+    partition (ds= '20250720')
 select after.id,
        after.order_id,
        after.org_id,
@@ -1456,10 +1324,7 @@ select after.id,
                            cast(after.inbound_time as bigint), 'UTC'),
                    'yyyy-MM-dd HH:mm:ss') inbound_time,
        after.inbound_emp_id
-from ods_order_org_bound after
-where ds = '20250718';
-
-select * from dwd_bound_inbound_inc;
+from ods_order_org_bound after limit 250;
 
 
 drop table if exists dwd_bound_sort_inc;
@@ -1472,30 +1337,11 @@ create external table dwd_bound_sort_inc(
 ) comment '中转域分拣事务事实表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dwd/dwd_bound_sort_inc'
+location '/warehouse/tms/dwd/dwd_bound_sort_inc'
 tblproperties('orc.compress' = 'snappy');
-
-
 set hive.exec.dynamic.partition.mode=nonstrict;
 insert overwrite table dwd_bound_sort_inc
-    partition (ds)
-select after.id,
-       after.order_id,
-       after.org_id,
-       date_format(from_utc_timestamp(
-                           cast(after.sort_time as bigint), 'UTC'),
-                   'yyyy-MM-dd HH:mm:ss') sort_time,
-       after.sorter_emp_id,
-       date_format(from_utc_timestamp(
-                           cast(after.sort_time as bigint), 'UTC'),
-                   'yyyy-MM-dd')          ds
-from ods_order_org_bound after
-where ds = '20250718'
-  and after.sort_time is not null;
-
-
-insert overwrite table dwd_bound_sort_inc
-    partition (ds = '20250718')
+    partition (ds="20250720")
 select after.id,
        after.order_id,
        after.org_id,
@@ -1503,12 +1349,8 @@ select after.id,
                            cast(after.sort_time as bigint), 'UTC'),
                    'yyyy-MM-dd HH:mm:ss') sort_time,
        after.sorter_emp_id
-from ods_order_org_bound after
-where ds = '20250718'
-  and after.sort_time is not null
-  and after.is_deleted = '0';
-
-select * from dwd_bound_sort_inc;
+from ods_order_org_bound as after
+where after.sort_time is not null limit 250;
 
 
 drop table if exists dwd_bound_outbound_inc;
@@ -1521,29 +1363,11 @@ create external table dwd_bound_outbound_inc(
 ) comment '中转域出库事务事实表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dwd/dwd_bound_outbound_inc'
+location '/warehouse/tms/dwd/dwd_bound_outbound_inc'
 tblproperties('orc.compress' = 'snappy');
-
 set hive.exec.dynamic.partition.mode=nonstrict;
 insert overwrite table dwd_bound_outbound_inc
-    partition (ds)
-select after.id,
-       after.order_id,
-       after.org_id,
-       date_format(from_utc_timestamp(
-                           cast(after.outbound_time as bigint), 'UTC'),
-                   'yyyy-MM-dd HH:mm:ss') outbound_time,
-       after.outbound_emp_id,
-       date_format(from_utc_timestamp(
-                           cast(after.outbound_time as bigint), 'UTC'),
-                   'yyyy-MM-dd')          ds
-from ods_order_org_bound after
-where ds = '20250718'
-  and after.outbound_time is not null;
-
-
-insert overwrite table dwd_bound_outbound_inc
-    partition (ds = '20250718')
+    partition (ds="20250720")
 select after.id,
        after.order_id,
        after.org_id,
@@ -1551,9 +1375,7 @@ select after.id,
                            cast(after.outbound_time as bigint), 'UTC'),
                    'yyyy-MM-dd HH:mm:ss') outbound_time,
        after.outbound_emp_id
-from ods_order_org_bound after
-where ds = '20250718'
-  and after.outbound_time is not null
-  and after.is_deleted = '0';
+from ods_order_org_bound as after
+where  after.outbound_time is not null;
 
-select * from dwd_bound_outbound_inc;
+

@@ -1,9 +1,6 @@
-set hive.exec.parallel=true; -- 允许并行执行UNION等操作
-set hive.exec.parallel.thread.number=2; -- 并行线程数
-set hive.exec.dynamic.partition.mode=nonstrict;
-set hive.exec.mode.local.auto=true;
-use tms01;
-
+set hive.exec.mode.local.auto=True;
+create database if not exists tms;
+use tms;
 drop table if exists dim_complex_full;
 create external table dim_complex_full(
       `id` bigint comment '小区ID',
@@ -18,20 +15,21 @@ create external table dim_complex_full(
 ) comment '小区维度表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dim/dim_complex_full'
+location '/warehouse/tms/tms/dim/dim_complex_full'
 tblproperties('orc.compress'='snappy');
 
-insert overwrite table dim_complex_full partition (ds = '20250718')
-select
-    complex_info.id   id,
-    complex_name,
-    courier_emp_ids,
-    province_id,
-    dic_for_prov.name province_name,
-    city_id,
-    dic_for_city.name city_name,
-    district_id,
-    district_name
+
+insert overwrite table dim_complex_full
+    partition (ds = '20250720')
+select complex_info.id,
+       complex_name,
+       courier_emp_ids,
+       province_id,
+       dic_for_prov.name province_name,
+       city_id,
+       dic_for_city.name city_name,
+       district_id,
+       district_name
 from (select id,
              complex_name,
              province_id,
@@ -39,32 +37,31 @@ from (select id,
              district_id,
              district_name
       from ods_base_complex
-      where ds = '20250718'
+      where ds = '20250720'
         and is_deleted = '0') complex_info
          join
      (select id,
              name
       from ods_base_region_info
-      where ds = '20250718'
+      where ds = '20250720'
         and is_deleted = '0') dic_for_prov
      on complex_info.province_id = dic_for_prov.id
          join
      (select id,
              name
       from ods_base_region_info
-      where ds = '20250718'
+      where ds = '20250720'
         and is_deleted = '0') dic_for_city
      on complex_info.city_id = dic_for_city.id
          left join
      (select
           collect_set(cast(courier_emp_id as string)) courier_emp_ids,
           complex_id
-      from ods_express_courier_complex where ds = '20250718' and is_deleted='0'
+      from ods_express_courier_complex where ds='20250720' and is_deleted='0'
       group by complex_id
      ) complex_courier
      on complex_info.id = complex_courier.complex_id;
 
-select * from dim_complex_full;
 
 drop table if exists dim_organ_full;
 create external table dim_organ_full(
@@ -79,11 +76,10 @@ create external table dim_organ_full(
 ) comment '机构维度表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dim/dim_organ_full'
+location '/warehouse/tms/tms/dim/dim_organ_full'
 tblproperties('orc.compress'='snappy');
-
-
-insert overwrite table dim_organ_full partition (ds = '20250718')
+insert overwrite table dim_organ_full
+    partition (ds = '20250720')
 select organ_info.id,
        organ_info.org_name,
        org_level,
@@ -98,14 +94,14 @@ from (select id,
              region_id,
              org_parent_id
       from ods_base_organ
-      where ds = '20250718'
+      where ds = '20250720'
         and is_deleted = '0') organ_info
          left join (
     select id,
            name,
            dict_code
     from ods_base_region_info
-    where ds = '20250718'
+    where ds = '20250720'
       and is_deleted = '0'
 ) region_info
                    on organ_info.region_id = region_info.id
@@ -113,12 +109,11 @@ from (select id,
     select id,
            org_name
     from ods_base_organ
-    where ds = '20250718'
+    where ds = '20250720'
       and is_deleted = '0'
 ) org_for_parent
                    on organ_info.org_parent_id = org_for_parent.id;
 
-select * from dim_organ_full;
 
 drop table if exists dim_region_full;
 create external table dim_region_full(
@@ -130,20 +125,18 @@ create external table dim_region_full(
 ) comment '地区维度表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dim/dim_region_full'
+location '/warehouse/tms/tms/dim/dim_region_full'
 tblproperties('orc.compress'='snappy');
-
-insert overwrite table dim_region_full partition (ds = '20250718')
+insert overwrite table dim_region_full
+    partition (ds = '20250720')
 select id,
        parent_id,
        name,
        dict_code,
        short_name
 from ods_base_region_info
-where ds = '20250718'
+where ds = '20250720'
   and is_deleted = '0';
-
-select * from dim_region_full;
 
 
 drop table if exists dim_express_courier_full;
@@ -158,11 +151,10 @@ create external table dim_express_courier_full(
 ) comment '快递员维度表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dim/dim_express_courier_full'
+location '/warehouse/tms/tms/dim/dim_express_courier_full'
 tblproperties('orc.compress'='snappy');
-
-
-insert overwrite table dim_express_courier_full partition (ds = '20250718')
+insert overwrite table dim_express_courier_full
+    partition (ds = '20250720')
 select express_cor_info.id,
        emp_id,
        org_id,
@@ -176,13 +168,13 @@ from (select id,
              md5(working_phone) working_phone,
              express_type
       from ods_express_courier
-      where ds = '20250718'
+      where ds = '20250720'
         and is_deleted = '0') express_cor_info
          join (
     select id,
            org_name
     from ods_base_organ
-    where ds = '20250718'
+    where ds = '20250720'
       and is_deleted = '0'
 ) organ_info
               on express_cor_info.org_id = organ_info.id
@@ -190,11 +182,10 @@ from (select id,
     select id,
            name
     from ods_base_dic
-    where ds = '20250718'
+    where ds = '20250720'
       and is_deleted = '0'
 ) dic_info
               on express_type = dic_info.id;
-select * from dim_express_courier_full;
 
 
 drop table if exists dim_shift_full;
@@ -223,11 +214,10 @@ create external table dim_shift_full(
 ) comment '班次维度表'
 partitioned by (`ds` string comment '统计周期')
 stored as orc
-location '/bigdata_warehouse/tms01/dim/dim_shift_full'
+location '/warehouse/tms/tms/dim/dim_shift_full'
 tblproperties('orc.compress'='snappy');
-
-
-insert overwrite table dim_shift_full partition (ds = '20250718')
+insert overwrite table dim_shift_full
+    partition (ds = '20250720')
 select shift_info.id,
        line_id,
        line_info.name line_name,
@@ -257,7 +247,7 @@ from (select id,
              truck_id,
              pair_shift_id
       from ods_line_base_shift
-      where ds = '20250718'
+      where ds = '20250720'
         and is_deleted = '0') shift_info
          join
      (select id,
@@ -275,19 +265,16 @@ from (select id,
              cost,
              estimated_time
       from ods_line_base_info
-      where ds = '20250718'
+      where ds = '20250720'
         and is_deleted = '0') line_info
      on shift_info.line_id = line_info.id
          join (
     select id,
            name
     from ods_base_dic
-    where ds = '20250718'
+    where ds = '20250720'
       and is_deleted = '0'
 ) dic_info on line_info.transport_line_type_id = dic_info.id;
-
-select * from dim_shift_full;
-
 
 
 drop table if exists dim_truck_driver_full;
@@ -306,11 +293,10 @@ create external table dim_truck_driver_full(
 ) comment '司机维度表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dim/dim_truck_driver_full'
+location '/warehouse/tms/tms/dim/dim_truck_driver_full'
 tblproperties('orc.compress'='snappy');
-
-
-insert overwrite table dim_truck_driver_full partition (ds = '20250718')
+insert overwrite table dim_truck_driver_full
+    partition (ds = '20250720')
 select driver_info.id,
        emp_id,
        org_id,
@@ -332,26 +318,19 @@ from (select id,
              license_no,
              is_enabled
       from ods_truck_driver
-      where ds = '20250718'
-        and is_deleted = '0') driver_info
+      where  is_deleted = '0') driver_info
          join (
     select id,
            org_name
     from ods_base_organ
-    where ds = '20250718'
-      and is_deleted = '0'
 ) organ_info
               on driver_info.org_id = organ_info.id
          join (
     select id,
            name
     from ods_truck_team
-    where ds = '20250718'
-      and is_deleted = '0'
 ) team_info
               on driver_info.team_id = team_info.id;
-
-select * from dim_truck_driver_full;
 
 
 drop table if exists dim_truck_full;
@@ -389,11 +368,10 @@ create external table dim_truck_full(
 ) comment '卡车维度表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dim/dim_truck_full'
+location '/warehouse/tms/tms/dim/dim_truck_full'
 tblproperties('orc.compress'='snappy');
-
-
-insert overwrite table dim_truck_full partition (ds = '20250718')
+insert overwrite table dim_truck_full
+    partition (ds = '20250720')
 select truck_info.id,
        team_id,
        team_info.name     team_name,
@@ -426,10 +404,8 @@ select truck_info.id,
        is_enabled
 from (select id,
              team_id,
-
              md5(truck_no) truck_no,
              truck_model_id,
-
              device_gps_id,
              engine_no,
              license_registration_date,
@@ -437,8 +413,7 @@ from (select id,
              license_expire_date,
              is_enabled
       from ods_truck_info
-      where ds = '20250718'
-        and is_deleted = '0') truck_info
+      where  is_deleted = '0') truck_info
          join
      (select id,
              name,
@@ -447,13 +422,13 @@ from (select id,
 
              manager_emp_id
       from ods_truck_team
-      where ds = '20250718'
-        and is_deleted = '0') team_info
+      where  is_deleted = '0') team_info
      on truck_info.team_id = team_info.id
          join
      (select id,
              model_name,
              model_type,
+
              model_no,
              brand,
              truck_weight,
@@ -466,34 +441,27 @@ from (select id,
              max_speed,
              oil_vol
       from ods_truck_model
-      where ds = '20250718'
-        and is_deleted = '0') model_info
+      where is_deleted = '0') model_info
      on truck_info.truck_model_id = model_info.id
          join
      (select id,
              org_name
       from ods_base_organ
-      where ds = '20250718'
-        and is_deleted = '0'
+      where  is_deleted = '0'
      ) organ_info
      on org_id = organ_info.id
          join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_type
+      where is_deleted = '0') dic_for_type
      on model_info.model_type = dic_for_type.id
          join
      (select id,
              name
       from ods_base_dic
-      where ds = '20250718'
-        and is_deleted = '0') dic_for_brand
+      where  is_deleted = '0') dic_for_brand
      on model_info.brand = dic_for_brand.id;
-
-
-select * from dim_truck_full;
 
 
 drop table if exists dim_user_zip;
@@ -513,31 +481,26 @@ create external table dim_user_zip(
 ) comment '用户拉链表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dim/dim_user_zip'
+location '/warehouse/tms/tms/dim/dim_user_zip'
 tblproperties('orc.compress'='snappy');
-
-
-insert overwrite table dim_user_zip partition (ds = '20250718')
+insert overwrite table dim_user_zip
+    partition (ds = '20250720')
 select after.id,
        after.login_name,
        after.nick_name,
-       md5(after.passwd)                                                                                    passwd,
-       md5(after.real_name)                                                                                 realname,
+       md5(after.passwd) passwd,
+       md5(after.real_name) realname,
        md5(if(after.phone_num regexp '^(13[0-9]|14[01456879]|15[0-35-9]|16[2567]|17[0-8]|18[0-9]|19[0-35-9])\\d{8}$',
-              after.phone_num, null))                                                                       phone_num,
+              after.phone_num, null)) phone_num,
        md5(if(after.email regexp '^[a-zA-Z0-9_-]+@[a-zA-Z0-9_-]+(\\.[a-zA-Z0-9_-]+)+$', after.email, null)) email,
        after.user_level,
-       date_add('1970-01-01', cast(after.birthday as int))                                                  birthday,
+       date_add('1970-01-01', cast(after.birthday as int)) birthday,
        after.gender,
-       date_format(from_utc_timestamp(
-                           cast(after.create_time as bigint), 'UTC'),
-                   'yyyy-MM-dd')                                                                            start_date,
-       '9999-12-31'                                                                                         end_date
-from ods_user_info after
-where ds = '20250718'
-  and after.is_deleted = '0';
+       date_format(from_utc_timestamp(cast(after.create_time as bigint), 'UTC'),'yyyy-MM-dd') tart_date,
+       '9999-12-31' end_date
+from ods_user_info as after
+where  after.is_deleted = '0';
 
-select * from dim_user_zip;
 
 drop table if exists dim_user_address_zip;
 create external table dim_user_address_zip(
@@ -555,11 +518,10 @@ create external table dim_user_address_zip(
 ) comment '用户地址拉链表'
 partitioned by (`ds` string comment '统计日期')
 stored as orc
-location '/bigdata_warehouse/tms01/dim/dim_user_address_zip'
+location '/warehouse/tms/tms/dim/dim_user_address_zip'
 tblproperties('orc.compress'='snappy');
-
-
-insert overwrite table dim_user_address_zip partition (ds = '20250718')
+insert overwrite table dim_user_address_zip
+    partition (ds = '20250720')
 select after.id,
        after.user_id,
        md5(if(after.phone regexp
@@ -574,8 +536,8 @@ select after.id,
        concat(substr(after.create_time, 1, 10), ' ',
               substr(after.create_time, 12, 8)) start_date,
        '9999-12-31'                             end_date
-from ods_user_address after
-where ds = '20250718'
+from ods_user_address as after
+where ds = '20250720'
   and after.is_deleted = '0';
 
-select * from dim_user_address_zip;
+
