@@ -1,6 +1,7 @@
 set hive.exec.mode.local.auto=True;
 create database if not exists tms;
 use tms;
+
 drop table if exists dim_complex_full;
 create external table dim_complex_full(
       `id` bigint comment '小区ID',
@@ -18,9 +19,7 @@ stored as orc
 location '/warehouse/tms/tms/dim/dim_complex_full'
 tblproperties('orc.compress'='snappy');
 
-
-insert overwrite table dim_complex_full
-    partition (ds = '20250720')
+insert overwrite table dim_complex_full partition (ds = '20250720')
 select complex_info.id,
        complex_name,
        courier_emp_ids,
@@ -62,6 +61,7 @@ from (select id,
      ) complex_courier
      on complex_info.id = complex_courier.complex_id;
 
+select * from dim_complex_full;
 
 drop table if exists dim_organ_full;
 create external table dim_organ_full(
@@ -78,8 +78,8 @@ partitioned by (`ds` string comment '统计日期')
 stored as orc
 location '/warehouse/tms/tms/dim/dim_organ_full'
 tblproperties('orc.compress'='snappy');
-insert overwrite table dim_organ_full
-    partition (ds = '20250720')
+
+insert overwrite table dim_organ_full partition (ds = '20250720')
 select organ_info.id,
        organ_info.org_name,
        org_level,
@@ -114,6 +114,7 @@ from (select id,
 ) org_for_parent
                    on organ_info.org_parent_id = org_for_parent.id;
 
+select * from dim_organ_full;
 
 drop table if exists dim_region_full;
 create external table dim_region_full(
@@ -127,8 +128,8 @@ partitioned by (`ds` string comment '统计日期')
 stored as orc
 location '/warehouse/tms/tms/dim/dim_region_full'
 tblproperties('orc.compress'='snappy');
-insert overwrite table dim_region_full
-    partition (ds = '20250720')
+
+insert overwrite table dim_region_full partition (ds = '20250720')
 select id,
        parent_id,
        name,
@@ -138,6 +139,7 @@ from ods_base_region_info
 where ds = '20250720'
   and is_deleted = '0';
 
+select * from dim_region_full;
 
 drop table if exists dim_express_courier_full;
 create external table dim_express_courier_full(
@@ -153,8 +155,8 @@ partitioned by (`ds` string comment '统计日期')
 stored as orc
 location '/warehouse/tms/tms/dim/dim_express_courier_full'
 tblproperties('orc.compress'='snappy');
-insert overwrite table dim_express_courier_full
-    partition (ds = '20250720')
+
+insert overwrite table dim_express_courier_full partition (ds = '20250720')
 select express_cor_info.id,
        emp_id,
        org_id,
@@ -187,6 +189,7 @@ from (select id,
 ) dic_info
               on express_type = dic_info.id;
 
+select * from dim_express_courier_full;
 
 drop table if exists dim_shift_full;
 create external table dim_shift_full(
@@ -216,8 +219,8 @@ partitioned by (`ds` string comment '统计周期')
 stored as orc
 location '/warehouse/tms/tms/dim/dim_shift_full'
 tblproperties('orc.compress'='snappy');
-insert overwrite table dim_shift_full
-    partition (ds = '20250720')
+
+insert overwrite table dim_shift_full partition (ds = '20250720')
 select shift_info.id,
        line_id,
        line_info.name line_name,
@@ -276,6 +279,7 @@ from (select id,
       and is_deleted = '0'
 ) dic_info on line_info.transport_line_type_id = dic_info.id;
 
+select * from dim_shift_full;
 
 drop table if exists dim_truck_driver_full;
 create external table dim_truck_driver_full(
@@ -295,8 +299,8 @@ partitioned by (`ds` string comment '统计日期')
 stored as orc
 location '/warehouse/tms/tms/dim/dim_truck_driver_full'
 tblproperties('orc.compress'='snappy');
-insert overwrite table dim_truck_driver_full
-    partition (ds = '20250720')
+
+insert overwrite table dim_truck_driver_full partition (ds = '20250720')
 select driver_info.id,
        emp_id,
        org_id,
@@ -332,6 +336,7 @@ from (select id,
 ) team_info
               on driver_info.team_id = team_info.id;
 
+select * from dim_truck_driver_full;
 
 drop table if exists dim_truck_full;
 create external table dim_truck_full(
@@ -370,8 +375,8 @@ partitioned by (`ds` string comment '统计日期')
 stored as orc
 location '/warehouse/tms/tms/dim/dim_truck_full'
 tblproperties('orc.compress'='snappy');
-insert overwrite table dim_truck_full
-    partition (ds = '20250720')
+
+insert overwrite table dim_truck_full partition (ds = '20250720')
 select truck_info.id,
        team_id,
        team_info.name     team_name,
@@ -419,7 +424,6 @@ from (select id,
              name,
              team_no,
              org_id,
-
              manager_emp_id
       from ods_truck_team
       where  is_deleted = '0') team_info
@@ -428,7 +432,6 @@ from (select id,
      (select id,
              model_name,
              model_type,
-
              model_no,
              brand,
              truck_weight,
@@ -463,6 +466,7 @@ from (select id,
       where  is_deleted = '0') dic_for_brand
      on model_info.brand = dic_for_brand.id;
 
+select * from dim_truck_full;
 
 drop table if exists dim_user_zip;
 create external table dim_user_zip(
@@ -483,8 +487,8 @@ partitioned by (`ds` string comment '统计日期')
 stored as orc
 location '/warehouse/tms/tms/dim/dim_user_zip'
 tblproperties('orc.compress'='snappy');
-insert overwrite table dim_user_zip
-    partition (ds = '20250720')
+
+insert overwrite table dim_user_zip partition (ds = '20250720')
 select after.id,
        after.login_name,
        after.nick_name,
@@ -494,13 +498,14 @@ select after.id,
               after.phone_num, null)) phone_num,
        md5(if(after.email regexp '^[a-zA-Z0-9_-]+@[a-zA-Z0-9_-]+(\\.[a-zA-Z0-9_-]+)+$', after.email, null)) email,
        after.user_level,
-       date_add('1970-01-01', cast(after.birthday as int)) birthday,
+       date_add('1970-01-01', datediff(to_date(after.birthday), '1970-01-01')) birthday,
        after.gender,
        date_format(from_utc_timestamp(cast(after.create_time as bigint), 'UTC'),'yyyy-MM-dd') tart_date,
        '9999-12-31' end_date
 from ods_user_info as after
 where  after.is_deleted = '0';
 
+select * from dim_user_zip;
 
 drop table if exists dim_user_address_zip;
 create external table dim_user_address_zip(
@@ -520,8 +525,8 @@ partitioned by (`ds` string comment '统计日期')
 stored as orc
 location '/warehouse/tms/tms/dim/dim_user_address_zip'
 tblproperties('orc.compress'='snappy');
-insert overwrite table dim_user_address_zip
-    partition (ds = '20250720')
+
+insert overwrite table dim_user_address_zip partition (ds = '20250720')
 select after.id,
        after.user_id,
        md5(if(after.phone regexp
@@ -539,5 +544,7 @@ select after.id,
 from ods_user_address as after
 where ds = '20250720'
   and after.is_deleted = '0';
+
+select * from dim_user_address_zip;
 
 

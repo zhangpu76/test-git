@@ -1,5 +1,6 @@
 set hive.exec.mode.local.auto=True;
 use tms;
+
 drop table if exists ads_city_stats;
 create external table ads_city_stats(
       `ds` string COMMENT '统计日期',
@@ -17,8 +18,7 @@ create external table ads_city_stats(
 row format delimited fields terminated by '\t'
 location '/warehouse/tms/ads/ads_city_stats';
 
-
-
+set hive.exec.dynamic.partition.mode=nonstrict;
 insert overwrite table ads_city_stats
 select ds,
        recent_days,
@@ -33,118 +33,155 @@ select ds,
        avg_trans_finish_dur_sec
 from ads_city_stats
 union
-select nvl(city_order_1d.ds, city_trans_1d.ds)                   ds,
-       nvl(city_order_1d.recent_days, city_trans_1d.recent_days) recent_days,
-       nvl(city_order_1d.city_id, city_trans_1d.city_id)         city_id,
-       nvl(city_order_1d.city_name, city_trans_1d.city_name)     city_name,
-       order_count,
-       order_amount,
-       trans_finish_count,
-       trans_finish_distance,
-       trans_finish_dur_sec,
-       avg_trans_finish_distance,
-       avg_trans_finish_dur_sec
-from (select '20250720'      ds,
-             1                 recent_days,
+select
+    nvl(city_order_1d.ds, city_trans_1d.ds) as ds,
+    nvl(city_order_1d.recent_days, city_trans_1d.recent_days) as recent_days,
+    nvl(city_order_1d.city_id, city_trans_1d.city_id) as city_id,
+    nvl(city_order_1d.city_name, city_trans_1d.city_name) as city_name,
+    order_count,
+    order_amount,
+    trans_finish_count,
+    trans_finish_distance,
+    -- 关键修改：处理trans_finish_dur_sec可能的NULL值
+    nvl(trans_finish_dur_sec, 0) as trans_finish_dur_sec,
+    -- 关键修改：处理平均值计算中的NULL和除零问题
+    nvl(avg_trans_finish_distance, 0) as avg_trans_finish_distance,
+    nvl(avg_trans_finish_dur_sec, 0) as avg_trans_finish_dur_sec
+from (
+         select
+             '20250720' as ds,
+             1 as recent_days,
              city_id,
              city_name,
-             sum(order_count)  order_count,
-             sum(order_amount) order_amount
-      from dws_trade_org_cargo_type_order_1d
-      where ds = '20250720'
-      group by city_id,
-               city_name) city_order_1d
-         full outer join
-     (select '20250720'                                         ds,
-             1                                                    recent_days,
-             city_id,
-             city_name,
-             sum(trans_finish_count)                              trans_finish_count,
-             sum(trans_finish_distance)                           trans_finish_distance,
-             sum(trans_finish_dur_sec)                            trans_finish_dur_sec,
-             sum(trans_finish_distance) / sum(trans_finish_count) avg_trans_finish_distance,
-             sum(trans_finish_dur_sec) / sum(trans_finish_count)  avg_trans_finish_dur_sec
-      from (select if(org_level = 1, city_for_level1.id, city_for_level2.id)     city_id,
-                   if(org_level = 1, city_for_level1.name, city_for_level2.name) city_name,
-                   trans_finish_count,
-                   trans_finish_distance,
-                   trans_finish_dur_sec
-            from (select org_id,
-                         trans_finish_count,
-                         trans_finish_distance,
-                         trans_finish_dur_sec
-                  from dws_trans_org_truck_model_type_trans_finish_1d
-                  where ds = '20250720') trans_origin
-                     left join
-                 (select id,
-                         org_level,
-                         region_id
-                  from dim_organ_full
-                  where ds = '20250720') organ
-                 on org_id = organ.id
-                     left join
-                 (select id,
-                         name,
-                         parent_id
-                  from dim_region_full
-                  where ds = '20250720') city_for_level1
-                 on region_id = city_for_level1.id
-                     left join
-                 (select id,
-                         name
-                  from dim_region_full
-                  where ds = '20250720') city_for_level2
-                 on city_for_level1.parent_id = city_for_level2.id) trans_1d
-      group by city_id,
-               city_name) city_trans_1d
-     on city_order_1d.ds = city_trans_1d.ds
-         and city_order_1d.recent_days = city_trans_1d.recent_days
-         and city_order_1d.city_id = city_trans_1d.city_id
-         and city_order_1d.city_name = city_trans_1d.city_name
+             sum(order_count) as order_count,
+             sum(order_amount) as order_amount
+         from dws_trade_org_cargo_type_order_1d
+         where ds = '20250720'
+         group by city_id, city_name
+     ) city_order_1d
+         full outer join (
+    select
+        '20250720' as ds,
+        1 as recent_days,
+        city_id,
+        city_name,
+        sum(trans_finish_count) as trans_finish_count,
+        sum(trans_finish_distance) as trans_finish_distance,
+        -- 处理trans_finish_dur_sec的NULL值
+        sum(coalesce(trans_finish_dur_sec, 0)) as trans_finish_dur_sec,
+        -- 处理除数为0的情况
+        case
+            when sum(trans_finish_count) > 0 then sum(trans_finish_distance) / sum(trans_finish_count)
+            else 0
+            end as avg_trans_finish_distance,
+        -- 处理除数为0的情况
+        case
+            when sum(trans_finish_count) > 0 then sum(coalesce(trans_finish_dur_sec, 0)) / sum(trans_finish_count)
+            else 0
+            end as avg_trans_finish_dur_sec
+    from (
+             select
+                 if(org_level = 1, city_for_level1.id, city_for_level2.id) as city_id,
+                 if(org_level = 1, city_for_level1.name, city_for_level2.name) as city_name,
+                 trans_origin.trans_finish_count,
+                 trans_origin.trans_finish_distance,
+                 trans_origin.trans_finish_dur_sec
+             from (
+                      select
+                          org_id,
+                          trans_finish_count,
+                          trans_finish_distance,
+                          trans_finish_dur_sec
+                      from dws_trans_org_truck_model_type_trans_finish_1d
+                      where ds = '20250720'
+                  ) trans_origin
+                      left join (
+                 select
+                     id,
+                     org_level,
+                     region_id
+                 from dim_organ_full
+                 where ds = '20250720'
+             ) organ on trans_origin.org_id = organ.id
+                      left join (
+                 select
+                     id,
+                     name,
+                     parent_id
+                 from dim_region_full
+                 where ds = '20250720'
+             ) city_for_level1 on organ.region_id = city_for_level1.id
+                      left join (
+                 select
+                     id,
+                     name
+                 from dim_region_full
+                 where ds = '20250720'
+             ) city_for_level2 on city_for_level1.parent_id = city_for_level2.id
+         ) trans_1d
+    group by city_id, city_name
+) city_trans_1d
+                         on city_order_1d.ds = city_trans_1d.ds
+                             and city_order_1d.recent_days = city_trans_1d.recent_days
+                             and city_order_1d.city_id = city_trans_1d.city_id
+                             and city_order_1d.city_name = city_trans_1d.city_name
 union
-select nvl(city_order_nd.ds, city_trans_nd.ds)                   ds,
-       nvl(city_order_nd.recent_days, city_trans_nd.recent_days) recent_days,
-       nvl(city_order_nd.city_id, city_trans_nd.city_id)         city_id,
-       nvl(city_order_nd.city_name, city_trans_nd.city_name)     city_name,
-       order_count,
-       order_amount,
-       trans_finish_count,
-       trans_finish_distance,
-       trans_finish_dur_sec,
-       avg_trans_finish_distance,
-       avg_trans_finish_dur_sec
-from (select '20250720'      ds,
+select
+    nvl(city_order_nd.ds, city_trans_nd.ds) as ds,
+    nvl(city_order_nd.recent_days, city_trans_nd.recent_days) as recent_days,
+    nvl(city_order_nd.city_id, city_trans_nd.city_id) as city_id,
+    nvl(city_order_nd.city_name, city_trans_nd.city_name) as city_name,
+    order_count,
+    order_amount,
+    trans_finish_count,
+    trans_finish_distance,
+    -- 关键修改：处理trans_finish_dur_sec可能的NULL值
+    nvl(trans_finish_dur_sec, 0) as trans_finish_dur_sec,
+    -- 关键修改：处理平均值计算中的NULL和除零问题
+    nvl(avg_trans_finish_distance, 0) as avg_trans_finish_distance,
+    nvl(avg_trans_finish_dur_sec, 0) as avg_trans_finish_dur_sec
+from (
+         select
+             '20250720' as ds,
              recent_days,
              city_id,
              city_name,
-             sum(order_count)  order_count,
-             sum(order_amount) order_amount
-      from dws_trade_org_cargo_type_order_nd
-      where ds = '20250720'
-      group by city_id,
-               city_name,
-               recent_days) city_order_nd
-         full outer join
-     (select '20250720'                                         ds,
-             city_id,
-             city_name,
-             recent_days,
-             sum(trans_finish_count)                              trans_finish_count,
-             sum(trans_finish_distance)                           trans_finish_distance,
-             sum(trans_finish_dur_sec)                            trans_finish_dur_sec,
-             sum(trans_finish_distance) / sum(trans_finish_count) avg_trans_finish_distance,
-             sum(trans_finish_dur_sec) / sum(trans_finish_count)  avg_trans_finish_dur_sec
-      from dws_trans_shift_trans_finish_nd
-      where ds = '20250720'
-      group by city_id,
-               city_name,
-               recent_days
-     ) city_trans_nd
-     on city_order_nd.ds = city_trans_nd.ds
-         and city_order_nd.recent_days = city_trans_nd.recent_days
-         and city_order_nd.city_id = city_trans_nd.city_id
-         and city_order_nd.city_name = city_trans_nd.city_name;
+             sum(order_count) as order_count,
+             sum(order_amount) as order_amount
+         from dws_trade_org_cargo_type_order_nd
+         where ds = '20250720'
+         group by city_id, city_name, recent_days
+     ) city_order_nd
+         full outer join (
+    select
+        '20250720' as ds,
+        recent_days,
+        city_id,
+        city_name,
+        sum(trans_finish_count) as trans_finish_count,
+        sum(trans_finish_distance) as trans_finish_distance,
+        -- 处理trans_finish_dur_sec的NULL值
+        sum(coalesce(trans_finish_dur_sec, 0)) as trans_finish_dur_sec,
+        -- 处理除数为0的情况
+        case
+            when sum(trans_finish_count) > 0 then sum(trans_finish_distance) / sum(trans_finish_count)
+            else 0
+            end as avg_trans_finish_distance,
+        -- 处理除数为0的情况
+        case
+            when sum(trans_finish_count) > 0 then sum(coalesce(trans_finish_dur_sec, 0)) / sum(trans_finish_count)
+            else 0
+            end as avg_trans_finish_dur_sec
+    from dws_trans_shift_trans_finish_nd
+    where ds = '20250720'
+    group by city_id, city_name, recent_days
+) city_trans_nd
+                         on city_order_nd.ds = city_trans_nd.ds
+                             and city_order_nd.recent_days = city_trans_nd.recent_days
+                             and city_order_nd.city_id = city_trans_nd.city_id
+                             and city_order_nd.city_name = city_trans_nd.city_name;
 
+select * from ads_city_stats;
 
 drop table if exists ads_driver_stats;
 create external table ads_driver_stats(
@@ -162,8 +199,9 @@ create external table ads_driver_stats(
 row format delimited fields terminated by '\t'
 location '/warehouse/tms/ads/ads_driver_stats';
 
-
+-- 插入数据（修复逻辑）
 insert overwrite table ads_driver_stats
+-- 保留历史数据（若需要，否则可删除此部分）
 select ds,
        recent_days,
        driver_emp_id,
@@ -175,50 +213,78 @@ select ds,
        avg_trans_finish_dur_sec,
        trans_finish_late_count
 from ads_driver_stats
-union
-select '20250720'                                         ds,
-       recent_days,
-       driver_id,
-       driver_name,
-       sum(trans_finish_count)                              trans_finish_count,
-       sum(trans_finish_distance)                           trans_finish_distance,
-       sum(trans_finish_dur_sec)                            trans_finish_dur_sec,
-       sum(trans_finish_distance) / sum(trans_finish_count) avg_trans_finish_distance,
-       sum(trans_finish_dur_sec) / sum(trans_finish_count)  avg_trans_finish_dur_sec,
-       sum(trans_finish_delay_count)                        trans_finish_delay_count
-from (select recent_days,
-             driver1_emp_id driver_id,
-             driver1_name   driver_name,
-             trans_finish_count,
-             trans_finish_distance,
-             trans_finish_dur_sec,
-             trans_finish_delay_count
-      from dws_trans_shift_trans_finish_nd
-      where ds = '20250720'
-        and driver2_emp_id is null
-      union
-      select recent_days,
-             cast(driver_info[0] as bigint) driver_id,
-             driver_info[1] driver_name,
-             trans_finish_count,
-             trans_finish_distance,
-             trans_finish_dur_sec,
-             trans_finish_delay_count
-      from (select recent_days,
-                   array(array(driver1_emp_id, driver1_name),
-                         array(driver2_emp_id, driver2_name)) driver_arr,
-                   trans_finish_count,
-                   trans_finish_distance / 2                  trans_finish_distance,
-                   trans_finish_dur_sec / 2                   trans_finish_dur_sec,
-                   trans_finish_delay_count
-            from dws_trans_shift_trans_finish_nd
-            where ds = '20250720'
-              and driver2_emp_id is not null) t1
-          lateral view explode(driver_arr) tmp as driver_info) t2
-group by driver_id,
-         driver_name,
-         recent_days;
+where 1=0  -- 临时关闭历史数据，先验证新数据
 
+union all  -- 用union all避免去重丢失数据
+-- 合并单司机和双司机数据
+select
+    '20250720' as ds,
+    recent_days,
+    driver_id,
+    driver_name,
+    sum(trans_finish_count) as trans_finish_count,
+    sum(trans_finish_distance) as trans_finish_distance,
+    sum(trans_finish_dur_sec) as trans_finish_dur_sec,
+    -- 处理除0，保留两位小数
+    case when sum(trans_finish_count) = 0 then 0
+         else round(sum(trans_finish_distance) / sum(trans_finish_count), 2)
+        end as avg_trans_finish_distance,
+    -- 平均时长取整
+    case when sum(trans_finish_count) = 0 then 0
+         else round(sum(trans_finish_dur_sec) / sum(trans_finish_count))
+        end as avg_trans_finish_dur_sec,
+    sum(trans_finish_delay_count) as trans_finish_late_count
+from (
+         -- 单司机数据：直接取第一司机
+         select
+             recent_days,
+             driver1_emp_id as driver_id,
+             driver1_name as driver_name,
+             trans_finish_count,
+             trans_finish_distance,
+             trans_finish_dur_sec,
+             trans_finish_delay_count
+         from dws_trans_shift_trans_finish_nd
+         where ds = '20250720'
+           and driver2_emp_id is null
+           and recent_days in (7, 30)  -- 只保留目标天数
+
+         union all
+
+         -- 双司机数据：拆分后各占一半指标
+         select
+             recent_days,
+             -- 处理driver_emp_id可能为NULL的情况
+             cast(coalesce(driver_info[0], 0) as bigint) as driver_id,  -- 避免cast失败
+             driver_info[1] as driver_name,
+             trans_finish_count,  -- 次数不拆分（一次运输两人共同完成）
+             trans_finish_distance / 2 as trans_finish_distance,  -- 里程平分
+             trans_finish_dur_sec / 2 as trans_finish_dur_sec,    -- 时长平分
+             trans_finish_delay_count  -- 逾期次数不拆分
+         from (
+                  select
+                      recent_days,
+                      -- 构造数组时处理NULL（避免array含NULL元素）
+                      array(
+                              array(coalesce(driver1_emp_id, 0), driver1_name),  -- 用0代替NULL司机ID
+                              array(coalesce(driver2_emp_id, 0), driver2_name)
+                          ) as driver_arr,
+                      trans_finish_count,
+                      trans_finish_distance,
+                      trans_finish_dur_sec,
+                      trans_finish_delay_count
+                  from dws_trans_shift_trans_finish_nd
+                  where ds = '20250720'
+                    and driver2_emp_id is not null  -- 确保有第二位司机
+                    and recent_days in (7, 30)      -- 只保留目标天数
+              ) t1
+             lateral view explode(driver_arr) tmp as driver_info
+     ) t2
+-- 过滤无效司机ID（若有）
+where driver_id != 0  -- 排除用0填充的无效ID
+group by recent_days, driver_id, driver_name;
+
+select * from ads_driver_stats;
 
 drop table if exists ads_express_city_stats;
 create external table ads_express_city_stats(
@@ -233,7 +299,6 @@ create external table ads_express_city_stats(
 ) comment '各城市快递统计'
 row format delimited fields terminated by '\t'
 location '/warehouse/tms/ads/ads_express_city_stats';
-
 
 insert overwrite table ads_express_city_stats
 select ds,
@@ -349,7 +414,7 @@ from (select '20250720'     ds,
          and city_deliver_nd.city_id = city_receive_nd.city_id
          and city_deliver_nd.city_name = city_receive_nd.city_name;
 
-
+select * from ads_express_city_stats;
 
 drop table if exists ads_express_org_stats;
 create external table ads_express_org_stats(
@@ -364,8 +429,6 @@ create external table ads_express_org_stats(
 ) comment '各机构快递统计'
 row format delimited fields terminated by '\t'
 location '/warehouse/tms/ads/ads_express_org_stats';
-
-
 
 insert overwrite table ads_express_org_stats
 select ds,
@@ -481,7 +544,7 @@ from (select '20250720'     ds,
          and org_deliver_nd.org_id = org_receive_nd.org_id
          and org_deliver_nd.org_name = org_receive_nd.org_name;
 
-
+select * from ads_express_org_stats;
 
 drop table if exists ads_express_province_stats;
 create external table ads_express_province_stats(
@@ -496,7 +559,6 @@ create external table ads_express_province_stats(
 ) comment '各省份快递统计'
 row format delimited fields terminated by '\t'
 location '/warehouse/tms/ads/ads_express_province_stats';
-
 
 insert overwrite table ads_express_province_stats
 select ds,
@@ -612,64 +674,7 @@ from (select '20250720'     ds,
          and province_deliver_nd.province_id = province_receive_nd.province_id
          and province_deliver_nd.province_name = province_receive_nd.province_name;
 
-
-
-
-drop table if exists ads_express_stats;
-create external table ads_express_stats(
-      `ds` string COMMENT '统计日期',
-      `recent_days` tinyint COMMENT '最近天数,1:最近天数,1:最近1天,7:最近7天,30:最近30天',
-      `deliver_suc_count` bigint COMMENT '派送成功次数（订单数）',
-      `sort_count` bigint COMMENT '分拣次数'
-) comment '快递综合统计'
-row format delimited fields terminated by '\t'
-location '/warehouse/tms/ads/ads_express_stats';
-
-insert overwrite table ads_express_stats
-select ds,
-       recent_days,
-       deliver_suc_count,
-       sort_count
-from ads_express_stats
-union
-select nvl(deliver_1d.ds, sort_1d.ds)                   ds,
-       nvl(deliver_1d.recent_days, sort_1d.recent_days) recent_days,
-       deliver_suc_count,
-       sort_count
-from (select '20250720'     ds,
-             1                recent_days,
-             sum(order_count) deliver_suc_count
-      from dws_trans_org_deliver_suc_1d
-      where ds = '20250720') deliver_1d
-         full outer join
-     (select '20250720'    ds,
-             1               recent_days,
-             sum(sort_count) sort_count
-      from dws_trans_org_sort_1d
-      where ds = '20250720') sort_1d
-     on deliver_1d.ds = sort_1d.ds
-         and deliver_1d.recent_days = sort_1d.recent_days
-union
-select nvl(deliver_nd.ds, sort_nd.ds)                   ds,
-       nvl(deliver_nd.recent_days, sort_nd.recent_days) recent_days,
-       deliver_suc_count,
-       sort_count
-from (select '20250720'     ds,
-             recent_days,
-             sum(order_count) deliver_suc_count
-      from dws_trans_org_deliver_suc_nd
-      where ds = '20250720'
-      group by recent_days) deliver_nd
-         full outer join
-     (select '20250720'    ds,
-             recent_days,
-             sum(sort_count) sort_count
-      from dws_trans_org_sort_nd
-      where ds = '20250720'
-      group by recent_days) sort_nd
-     on deliver_nd.ds = sort_nd.ds
-         and deliver_nd.recent_days = sort_nd.recent_days;
-
+select * from ads_express_province_stats;
 
 drop table if exists ads_express_stats;
 create external table ads_express_stats(
@@ -682,51 +687,80 @@ row format delimited fields terminated by '\t'
 location '/warehouse/tms/ads/ads_express_stats';
 
 insert overwrite table ads_express_stats
-select ds,
-       recent_days,
-       deliver_suc_count,
-       sort_count
+-- 1. 历史数据部分：保持与表结构一致
+select
+    ds,
+    recent_days,
+    deliver_suc_count,
+    sort_count
 from ads_express_stats
-union
-select nvl(deliver_1d.ds, sort_1d.ds)                   ds,
-       nvl(deliver_1d.recent_days, sort_1d.recent_days) recent_days,
-       deliver_suc_count,
-       sort_count
-from (select '20250720'     ds,
-             1                recent_days,
-             sum(order_count) deliver_suc_count
-      from dws_trans_org_deliver_suc_1d
-      where ds = '20250720') deliver_1d
-         full outer join
-     (select '20250720'    ds,
-             1               recent_days,
-             sum(sort_count) sort_count
-      from dws_trans_org_sort_1d
-      where ds = '20250720') sort_1d
-     on deliver_1d.ds = sort_1d.ds
-         and deliver_1d.recent_days = sort_1d.recent_days
-union
-select nvl(deliver_nd.ds, sort_nd.ds)                   ds,
-       nvl(deliver_nd.recent_days, sort_nd.recent_days) recent_days,
-       deliver_suc_count,
-       sort_count
-from (select '20250720'     ds,
-             recent_days,
-             sum(order_count) deliver_suc_count
-      from dws_trans_org_deliver_suc_nd
-      where ds = '20250720'
-      group by recent_days) deliver_nd
-         full outer join
-     (select '20250720'    ds,
-             recent_days,
-             sum(sort_count) sort_count
-      from dws_trans_org_sort_nd
-      where ds = '20250720'
-      group by recent_days) sort_nd
-     on deliver_nd.ds = sort_nd.ds
-         and deliver_nd.recent_days = sort_nd.recent_days;
+where 1=0  -- 先清空历史数据，避免结构冲突
 
+union all
 
+-- 2. 最近1天数据：按组织分组，字段与表结构一致
+select
+    nvl(deliver_1d.ds, sort_1d.ds) as ds,
+    nvl(deliver_1d.recent_days, sort_1d.recent_days) as recent_days,
+    nvl(deliver_1d.deliver_suc_count, 0) as deliver_suc_count,  -- 确保非空
+    nvl(sort_1d.sort_count, 0) as sort_count                     -- 确保非空
+from (
+         select
+             '20250720' as ds,
+             1 as recent_days,
+             org_id,
+             sum(order_count) as deliver_suc_count
+         from dws_trans_org_deliver_suc_1d
+         where ds = '20250720'
+         group by org_id
+     ) deliver_1d
+         full outer join (
+    select
+        '20250720' as ds,
+        1 as recent_days,
+        org_id,
+        sum(sort_count) as sort_count
+    from dws_trans_org_sort_1d
+    where ds = '20250720'
+    group by org_id
+) sort_1d
+                         on deliver_1d.org_id = sort_1d.org_id
+                             and deliver_1d.ds = sort_1d.ds
+                             and deliver_1d.recent_days = sort_1d.recent_days
+
+union all
+
+-- 3. 最近N天数据：同样保持4个字段
+select
+    nvl(deliver_nd.ds, sort_nd.ds) as ds,
+    nvl(deliver_nd.recent_days, sort_nd.recent_days) as recent_days,
+    nvl(deliver_nd.deliver_suc_count, 0) as deliver_suc_count,
+    nvl(sort_nd.sort_count, 0) as sort_count
+from (
+         select
+             '20250720' as ds,
+             recent_days,
+             org_id,
+             sum(order_count) as deliver_suc_count
+         from dws_trans_org_deliver_suc_nd
+         where ds = '20250720'
+         group by recent_days, org_id
+     ) deliver_nd
+         full outer join (
+    select
+        '20250720' as ds,
+        recent_days,
+        org_id,
+        sum(sort_count) as sort_count
+    from dws_trans_org_sort_nd
+    where ds = '20250720'
+    group by recent_days, org_id
+) sort_nd
+                         on deliver_nd.org_id = sort_nd.org_id
+                             and deliver_nd.ds = sort_nd.ds
+                             and deliver_nd.recent_days = sort_nd.recent_days;
+
+select * from ads_express_stats;
 
 drop table if exists ads_line_stats;
 create external table ads_line_stats(
@@ -767,7 +801,7 @@ group by line_id,
          line_name,
          recent_days;
 
-
+select * from ads_line_stats;
 
 drop table if exists ads_order_cargo_type_stats;
 create external table ads_order_cargo_type_stats(
@@ -780,7 +814,6 @@ create external table ads_order_cargo_type_stats(
 ) comment '各类型货物运单统计'
 row format delimited fields terminated by '\t'
 location '/warehouse/tms/ads/ads_order_cargo_type_stats';
-
 
 insert overwrite table ads_order_cargo_type_stats
 select ds,
@@ -814,6 +847,7 @@ group by cargo_type,
          cargo_type_name,
          recent_days;
 
+select * from ads_order_cargo_type_stats;
 
 drop table if exists ads_order_stats;
 create external table ads_order_stats(
@@ -824,7 +858,6 @@ create external table ads_order_stats(
 ) comment '运单综合统计'
 row format delimited fields terminated by '\t'
 location '/warehouse/tms/ads/ads_order_stats';
-
 
 insert overwrite table ads_order_stats
 select ds,
@@ -848,7 +881,7 @@ from dws_trade_org_cargo_type_order_nd
 where ds = '20250720'
 group by recent_days;
 
-
+select * from ads_order_stats;
 
 drop table if exists ads_org_stats;
 create external table ads_org_stats(
@@ -866,7 +899,6 @@ create external table ads_org_stats(
 ) comment '机构分析'
 row format delimited fields terminated by '\t'
 location '/warehouse/tms/ads/ads_org_stats';
-
 
 insert overwrite table ads_org_stats
 select ds,
@@ -966,8 +998,7 @@ from (select '20250720'      ds,
          and org_order_nd.org_id = org_trans_nd.org_id
          and org_order_nd.org_name = org_trans_nd.org_name;
 
-
-
+select * from ads_org_stats;
 
 drop table if exists ads_shift_stats;
 create external table ads_shift_stats(
@@ -1002,7 +1033,7 @@ select '20250720' ds,
 from dws_trans_shift_trans_finish_nd
 where ds = '20250720';
 
-
+select * from ads_shift_stats;
 
 drop table if exists ads_trans_order_stats;
 create external table ads_trans_order_stats(
@@ -1015,7 +1046,6 @@ create external table ads_trans_order_stats(
 ) comment '运单相关统计'
 row format delimited fields terminated by '\t'
 location '/warehouse/tms/ads/ads_trans_order_stats';
-
 
 insert overwrite table ads_trans_order_stats
 select ds,
@@ -1065,7 +1095,7 @@ from (select recent_days,
       where ds = '20250720') dispatch_nd
      on receive_nd.recent_days = dispatch_nd.recent_days;
 
-
+select * from ads_trans_order_stats;
 
 drop table if exists ads_trans_order_stats_td;
 create external table ads_trans_order_stats_td(
@@ -1077,29 +1107,39 @@ row format delimited fields terminated by '\t'
 location '/warehouse/tms/ads/ads_trans_order_stats_td';
 
 insert overwrite table ads_trans_order_stats_td
+-- 1. 保留历史数据（非当前统计日的数据）
 select ds,
        bounding_order_count,
        bounding_order_amount
 from ads_trans_order_stats_td
-union
+where ds != '20250720'  -- 排除当前日，避免重复计算
+
+union all  -- 用 union all 避免去重，保留所有日期
+
+-- 2. 新增当前日（20250720）的数据
 select ds,
-       sum(order_count)  bounding_order_count,
-       sum(order_amount) bounding_order_amount
-from (select ds,
-             order_count,
-             order_amount
-      from dws_trans_dispatch_td
-      where ds = '20250720'
-      union
-      select ds,
-             order_count * (-1),
-             order_amount * (-1)
-      from dws_trans_bound_finish_td
-      where ds = '20250720') new
-group by ds;
+       sum(order_count) as bounding_order_count,
+       sum(order_amount) as bounding_order_amount
+from (
+         -- 调度单数据（正数）
+         select ds,
+                order_count,
+                order_amount
+         from dws_trans_dispatch_td
+         where ds = '20250720'
 
+         union all  -- 用 union all 保留所有记录，不自动去重
 
+         -- 取消/完成的绑定单数据（负数）
+         select ds,
+                order_count * (-1) as order_count,
+                order_amount * (-1) as order_amount
+         from dws_trans_bound_finish_td
+         where ds = '20250720'
+     ) new
+group by ds;  -- 按 ds 分组，确保每天一条记录
 
+select * from ads_trans_order_stats_td;
 
 drop table if exists ads_trans_stats;
 create external table ads_trans_stats(
@@ -1111,7 +1151,6 @@ create external table ads_trans_stats(
 ) comment '运输综合统计'
 row format delimited fields terminated by '\t'
 location '/warehouse/tms/ads/ads_trans_stats';
-
 
 insert overwrite table ads_trans_stats
 select ds,
@@ -1138,7 +1177,7 @@ from dws_trans_shift_trans_finish_nd
 where ds = '20250720'
 group by recent_days;
 
-
+select * from ads_trans_stats;
 
 drop table if exists ads_truck_stats;
 create external table ads_truck_stats(
@@ -1166,8 +1205,8 @@ select ds,
        avg_trans_finish_distance,
        avg_trans_finish_dur_sec
 from ads_truck_stats
-union
-select '20250720' ds,
+union all
+select '20250720'                                         ds,
        recent_days,
        truck_model_type,
        truck_model_type_name,
@@ -1182,3 +1221,4 @@ group by truck_model_type,
          truck_model_type_name,
          recent_days;
 
+select * from ads_truck_stats;
