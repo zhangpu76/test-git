@@ -1,15 +1,13 @@
 # -*- coding: utf-8 -*-
 from pyspark.sql import SparkSession
-from pyspark.sql import functions as F  # 统一导入functions模块并别名F
+from pyspark.sql.functions import lit
 import sys
 
-from pyspark.sql.types import StringType
 
-
-# 获取SparkSession
 def get_spark_session():
+    """获取配置好的SparkSession"""
     spark = SparkSession.builder \
-        .appName("TmsDwdEtlFull") \
+        .appName("TMSDwdETL") \
         .config("hive.metastore.uris", "thrift://cdh01:9083") \
         .config("spark.sql.hive.convertMetastoreOrc", "true") \
         .config("spark.hadoop.hive.exec.dynamic.partition", "true") \
@@ -17,68 +15,57 @@ def get_spark_session():
         .enableHiveSupport() \
         .getOrCreate()
     spark.sparkContext.setLogLevel("WARN")
-    spark.sql("USE tms")
+    spark.sql("USE tms")  # 切换到目标数据库
     return spark
 
 
-# 创建外部表通用函数（修正版本：分开执行DROP和CREATE）
-def create_external_table(spark, table_name, schema, location, partition_cols):
-    """
-    创建外部表
-    :param spark: SparkSession
-    :param table_name: 表名
-    :param schema: 字段列表，格式：[(字段名, 类型, 注释), ...]
-    :param location: 存储路径
-    :param partition_cols: 分区字段列表，格式：[(字段名, 类型, 注释), ...]
-    """
-    # 1. 先执行删除表语句（单独执行）
-    drop_sql = "DROP TABLE IF EXISTS {}".format(table_name)
-    spark.sql(drop_sql)
-
-    # 构建字段定义
-    fields_def = ", ".join([
-        "`{0}` {1} COMMENT '{2}'".format(col_name, data_type, comment)
-        for col_name, data_type, comment in schema
-    ])
-    # 构建分区字段定义
-    partition_def = ", ".join([
-        "`{0}` {1} COMMENT '{2}'".format(col_name, data_type, comment)
-        for col_name, data_type, comment in partition_cols
-    ]) if partition_cols else ""
-    # 表注释（从表名提取）
-    table_comment = "COMMENT '{0}事务事实表'".format(schema[0][2].split('事务')[0]) if len(schema) > 0 else ""
-
-    # 2. 构建并执行创建表语句（单独执行）
-    create_sql = """
-    CREATE EXTERNAL TABLE {0}(
-        {1}
-    )
-    {2}
-    PARTITIONED BY ({3})
-    STORED AS ORC
-    LOCATION '{4}'
-    TBLPROPERTIES('orc.compress' = 'snappy')
-    """.format(table_name, fields_def, table_comment, partition_def, location)
-    spark.sql(create_sql)
+def insert_to_hive(df, table_name, partition_date=None):
+    """将DataFrame写入Hive表，兼容动态分区"""
+    if df.rdd.isEmpty():
+        print("[WARN] No data found for {0}, skipping write.".format(table_name))
+        return
+    # 若需固定分区则添加，动态分区由SQL内部处理
+    if partition_date:
+        df = df.withColumn("ds", lit(partition_date))
+    df.write.mode("overwrite").insertInto("tms.{}".format(table_name))
 
 
-# 插入分区表通用函数（优化：确保列顺序与目标表一致，兼容Python 2.x）
-def insert_overwrite_partition(df, table_name, partition_col, partition_val, spark):
-    """覆盖写入分区表，确保列顺序与目标表一致"""
-    # 添加分区列
-    df = df.withColumn(partition_col, F.lit(partition_val))
-    # 获取目标表的列顺序（使用format格式化，兼容Python 2.x）
-    target_cols = spark.sql("SELECT * FROM {0} LIMIT 0".format(table_name)).columns
-    # 按目标表列顺序重新排序
-    df = df.select(target_cols)
-    # 写入数据
-    df.write.mode("overwrite").insertInto(table_name)
-
-
-# ------------------------------ dwd_trade_order_detail_inc ------------------------------
 def etl_dwd_trade_order_detail_inc(spark, ds):
-    # 读取源表数据
-    cargo_df = spark.sql("""
+    """交易域订单明细事务事实表"""
+    sql = """
+    SELECT
+        cargo.id,
+        order_id,
+        cargo_type,
+        dic_for_cargo_type.name               cargo_type_name,
+        volume_length,
+        volume_width,
+        volume_height,
+        weight,
+        order_time,
+        order_no,
+        status,
+        dic_for_status.name                   status_name,
+        collect_type,
+        dic_for_collect_type.name             collect_type_name,
+        user_id,
+        receiver_complex_id,
+        receiver_province_id,
+        receiver_city_id,
+        receiver_district_id,
+        receiver_name,
+        sender_complex_id,
+        sender_province_id,
+        sender_city_id,
+        sender_district_id,
+        sender_name,
+        cargo_num,
+        amount,
+        estimate_arrive_time,
+        distance,
+        unix_timestamp(order_time, 'yyyy-MM-dd HH:mm:ss') * 1000  ts,
+        date_format(order_time, 'yyyy-MM-dd') ds
+    FROM (
         SELECT 
             after.id,
             after.order_id,
@@ -87,13 +74,12 @@ def etl_dwd_trade_order_detail_inc(spark, ds):
             after.volume_width,
             after.volume_height,
             after.weight,
-            concat(substring(after.create_time, 1, 10), ' ', substring(after.create_time, 12, 8)) AS order_time,
-            unix_timestamp(now()) AS ts  -- 生成时间戳（秒级）作为ts源
-        FROM ods_order_cargo AS after
-        WHERE after.is_deleted = '0'
-    """)
-
-    info_df = spark.sql("""
+            concat(substr(after.create_time, 1, 10), ' ', substr(after.create_time, 12, 8)) order_time,
+            ds
+        FROM ods_order_cargo as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) cargo
+    JOIN (
         SELECT 
             after.id,
             after.order_no,
@@ -104,87 +90,102 @@ def etl_dwd_trade_order_detail_inc(spark, ds):
             after.receiver_province_id,
             after.receiver_city_id,
             after.receiver_district_id,
-            concat(substring(after.receiver_name, 1, 1), '*') AS receiver_name,
+            concat(substr(after.receiver_name, 1, 1), '*') receiver_name,
             after.sender_complex_id,
             after.sender_province_id,
             after.sender_city_id,
             after.sender_district_id,
-            concat(substring(after.sender_name, 1, 1), '*') AS sender_name,
+            concat(substr(after.sender_name, 1, 1), '*')   sender_name,
             after.cargo_num,
             after.amount,
-            date_format(
-                from_utc_timestamp(
-                    to_timestamp(CAST(after.estimate_arrive_time AS BIGINT) / 1000),
-                    'UTC'
-                ),
-                'yyyy-MM-dd HH:mm:ss'
-            ) AS estimate_arrive_time,
+            case
+                when after.estimate_arrive_time is null or trim(after.estimate_arrive_time) = '' then null
+                when after.estimate_arrive_time rlike '^\\d+$' then date_format(
+                        from_utc_timestamp(
+                            to_timestamp(
+                                case when length(after.estimate_arrive_time) = 10 
+                                     then cast(after.estimate_arrive_time as bigint) 
+                                     else cast(after.estimate_arrive_time as bigint)/1000 
+                                end
+                            ), 
+                            'UTC'
+                        ),
+                        'yyyy-MM-dd HH:mm:ss'
+                    )
+                else date_format(from_utc_timestamp(to_timestamp(after.estimate_arrive_time), 'UTC'), 'yyyy-MM-dd HH:mm:ss')
+                end as estimate_arrive_time,
             after.distance
-        FROM ods_order_info AS after
-        WHERE after.is_deleted = '0'
-    """)
-
-    # 维度表数据
-    base_dic = spark.sql("SELECT id, name FROM ods_base_dic WHERE is_deleted = '0'")
-
-    # 关联数据，补充ts字段
-    result_df = cargo_df.alias("cargo") \
-        .join(info_df.alias("info"), F.col("cargo.order_id") == F.col("info.id"), "inner") \
-        .join(
-        base_dic.alias("cargo_type_dic"),
-        F.col("cargo.cargo_type") == F.col("cargo_type_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .join(
-        base_dic.alias("status_dic"),
-        F.col("info.status") == F.col("status_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .join(
-        base_dic.alias("collect_type_dic"),
-        F.col("info.collect_type") == F.col("collect_type_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .select(
-        F.col("cargo.id"),
-        F.col("cargo.order_id"),
-        F.col("cargo.cargo_type"),
-        F.col("cargo_type_dic.name").alias("cargo_type_name"),
-        F.col("cargo.volume_length"),
-        F.col("cargo.volume_width"),
-        F.col("cargo.volume_height"),
-        F.col("cargo.weight"),
-        F.col("cargo.order_time"),
-        F.col("info.order_no"),
-        F.col("info.status"),
-        F.col("status_dic.name").alias("status_name"),
-        F.col("info.collect_type"),
-        F.col("collect_type_dic.name").alias("collect_type_name"),
-        F.col("info.user_id"),
-        F.col("info.receiver_complex_id"),
-        F.col("info.receiver_province_id"),
-        F.col("info.receiver_city_id"),
-        F.col("info.receiver_district_id"),
-        F.col("info.receiver_name"),
-        F.col("info.sender_complex_id"),
-        F.col("info.sender_province_id"),
-        F.col("info.sender_city_id"),
-        F.col("info.sender_district_id"),
-        F.col("info.sender_name"),
-        F.col("info.cargo_num"),
-        F.col("info.amount"),
-        F.col("info.estimate_arrive_time"),
-        F.col("info.distance"),
-        F.col("cargo.ts").cast("bigint").alias("ts"),  # 补充ts字段（匹配表结构）
-        F.date_format(F.col("cargo.order_time"), 'yyyy-MM-dd').alias("ds")  # 分区字段ds
-    )
-
-    insert_overwrite_partition(result_df, "dwd_trade_order_detail_inc", "ds", ds, spark)
+        FROM ods_order_info as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) info ON cargo.order_id = info.id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_cargo_type ON cargo.cargo_type = cast(dic_for_cargo_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_status ON info.status = cast(dic_for_status.id as string)
+    -- 修复：collect_type应关联dic_for_collect_type自身的id，而非dic_for_cargo_type的id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_collect_type ON info.collect_type = cast(dic_for_collect_type.id as string)
+    """.format(ds)
+    df = spark.sql(sql)
+    insert_to_hive(df, "dwd_trade_order_detail_inc")
 
 
-# ------------------------------ dwd_trade_pay_suc_detail_inc ------------------------------
 def etl_dwd_trade_pay_suc_detail_inc(spark, ds):
-    cargo_df = spark.sql("""
+    """交易域支付成功事务事实表"""
+    sql = """
+    SELECT
+        cargo.id,
+        order_id,
+        cargo_type,
+        dic_for_cargo_type.name                 cargo_type_name,
+        volume_length,
+        volume_width,
+        volume_height,
+        weight,
+        payment_time,
+        order_no,
+        status,
+        dic_for_status.name                     status_name,
+        collect_type,
+        dic_for_collect_type.name               collect_type_name,
+        user_id,
+        receiver_complex_id,
+        receiver_province_id,
+        receiver_city_id,
+        receiver_district_id,
+        receiver_name,
+        sender_complex_id,
+        sender_province_id,
+        sender_city_id,
+        sender_district_id,
+        sender_name,
+        payment_type,
+        dic_for_payment_type.name               payment_type_name,
+        cargo_num,
+        amount,
+        case
+            when estimate_arrive_time is null or trim(estimate_arrive_time) = '' then null
+            when estimate_arrive_time rlike '^\\d+$' then date_format(
+                    from_utc_timestamp(
+                        to_timestamp(
+                            case when length(estimate_arrive_time) = 10 
+                                 then cast(estimate_arrive_time as bigint) 
+                                 else cast(estimate_arrive_time as bigint)/1000 
+                            end
+                        ), 
+                        'UTC'
+                    ),
+                    'yyyy-MM-dd HH:mm:ss'
+                )
+            else estimate_arrive_time
+            end as estimate_arrive_time,
+        distance,
+        unix_timestamp(payment_time, 'yyyy-MM-dd HH:mm:ss') * 1000  ts,
+        date_format(payment_time, 'yyyy-MM-dd') ds
+    FROM (
         SELECT 
             after.id,
             after.order_id,
@@ -193,12 +194,11 @@ def etl_dwd_trade_pay_suc_detail_inc(spark, ds):
             after.volume_width,
             after.volume_height,
             after.weight,
-            unix_timestamp(now()) AS ts  -- 时间戳字段
-        FROM ods_order_cargo AS after
-        WHERE after.is_deleted = '0'
-    """)
-
-    info_df = spark.sql("""
+            ds
+        FROM ods_order_cargo as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) cargo
+    JOIN (
         SELECT 
             after.id,
             after.order_no,
@@ -209,93 +209,631 @@ def etl_dwd_trade_pay_suc_detail_inc(spark, ds):
             after.receiver_province_id,
             after.receiver_city_id,
             after.receiver_district_id,
-            concat(substring(after.receiver_name, 1, 1), '*') AS receiver_name,
+            concat(substr(after.receiver_name, 1, 1), '*') receiver_name,
             after.sender_complex_id,
             after.sender_province_id,
             after.sender_city_id,
             after.sender_district_id,
-            concat(substring(after.sender_name, 1, 1), '*') AS sender_name,
+            concat(substr(after.sender_name, 1, 1), '*') sender_name,
             after.payment_type,
             after.cargo_num,
             after.amount,
-            date_format(
-                from_utc_timestamp(
-                    to_timestamp(CAST(after.estimate_arrive_time AS BIGINT) / 1000),
-                    'UTC'
-                ),
-                'yyyy-MM-dd HH:mm:ss'
-            ) AS estimate_arrive_time,
+            after.estimate_arrive_time,
             after.distance,
-            concat(substring(after.update_time, 1, 10), ' ', substring(after.update_time, 12, 8)) AS payment_time
-        FROM ods_order_info AS after
-    """)
-
-    base_dic = spark.sql("SELECT id, name FROM ods_base_dic WHERE is_deleted = '0'")
-
-    result_df = cargo_df.alias("cargo") \
-        .join(info_df.alias("info"), F.col("cargo.order_id") == F.col("info.id"), "inner") \
-        .join(
-        base_dic.alias("cargo_type_dic"),
-        F.col("cargo.cargo_type") == F.col("cargo_type_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .join(
-        base_dic.alias("status_dic"),
-        F.col("info.status") == F.col("status_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .join(
-        base_dic.alias("collect_type_dic"),
-        F.col("info.collect_type") == F.col("collect_type_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .join(
-        base_dic.alias("payment_type_dic"),
-        F.col("info.payment_type") == F.col("payment_type_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .select(
-        F.col("cargo.id"),
-        F.col("cargo.order_id"),
-        F.col("cargo.cargo_type"),
-        F.col("cargo_type_dic.name").alias("cargo_type_name"),
-        F.col("cargo.volume_length"),
-        F.col("cargo.volume_width"),
-        F.col("cargo.volume_height"),
-        F.col("cargo.weight"),
-        F.col("info.payment_time"),
-        F.col("info.order_no"),
-        F.col("info.status"),
-        F.col("status_dic.name").alias("status_name"),
-        F.col("info.collect_type"),
-        F.col("collect_type_dic.name").alias("collect_type_name"),
-        F.col("info.user_id"),
-        F.col("info.receiver_complex_id"),
-        F.col("info.receiver_province_id"),
-        F.col("info.receiver_city_id"),
-        F.col("info.receiver_district_id"),
-        F.col("info.receiver_name"),
-        F.col("info.sender_complex_id"),
-        F.col("info.sender_province_id"),
-        F.col("info.sender_city_id"),
-        F.col("info.sender_district_id"),
-        F.col("info.sender_name"),
-        F.col("info.payment_type"),
-        F.col("payment_type_dic.name").alias("payment_type_name"),
-        F.col("info.cargo_num"),
-        F.col("info.amount"),
-        F.col("info.estimate_arrive_time"),
-        F.col("info.distance"),
-        F.col("cargo.ts").cast("bigint").alias("ts"),  # 补充ts字段
-        F.date_format(F.col("info.payment_time"), 'yyyy-MM-dd').alias("ds")
-    )
-
-    insert_overwrite_partition(result_df, "dwd_trade_pay_suc_detail_inc", "ds", ds, spark)
+            concat(substr(after.update_time, 1, 10), ' ', substr(after.update_time, 12, 8)) payment_time
+        FROM ods_order_info as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) info ON cargo.order_id = info.id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_cargo_type ON cargo.cargo_type = cast(dic_for_cargo_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_status ON info.status = cast(dic_for_status.id as string)
+    -- 修复：collect_type关联dic_for_collect_type自身id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_collect_type ON info.collect_type = cast(dic_for_collect_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_payment_type ON info.payment_type = cast(dic_for_payment_type.id as string)
+    """.format(ds)
+    df = spark.sql(sql)
+    insert_to_hive(df, "dwd_trade_pay_suc_detail_inc")
 
 
-# ------------------------------ dwd_trans_sign_detail_inc ------------------------------
+def etl_dwd_trade_order_cancel_detail_inc(spark, ds):
+    """交易域取消运单事务事实表"""
+    sql = """
+    SELECT
+        cargo.id,
+        order_id,
+        cargo_type,
+        dic_for_cargo_type.name                 cargo_type_name,
+        volume_length,
+        volume_width,
+        volume_height,
+        weight,
+        cancel_time,
+        order_no,
+        status,
+        dic_for_status.name                     status_name,
+        collect_type,
+        dic_for_collect_type.name               collect_type_name,
+        user_id,
+        receiver_complex_id,
+        receiver_province_id,
+        receiver_city_id,
+        receiver_district_id,
+        receiver_name,
+        sender_complex_id,
+        sender_province_id,
+        sender_city_id,
+        sender_district_id,
+        sender_name,
+        cargo_num,
+        amount,
+        case
+            when info.estimate_arrive_time is null or trim(info.estimate_arrive_time) = '' then null
+            when info.estimate_arrive_time rlike '^\\d+$' then date_format(
+                    from_utc_timestamp(
+                        to_timestamp(
+                            case when length(info.estimate_arrive_time) = 10 
+                                 then cast(info.estimate_arrive_time as bigint) 
+                                 else cast(info.estimate_arrive_time as bigint)/1000 
+                            end
+                        ), 
+                        'UTC'
+                    ),
+                    'yyyy-MM-dd HH:mm:ss'
+                )
+            else info.estimate_arrive_time
+            end as estimate_arrive_time,
+        distance,
+        unix_timestamp(cancel_time, 'yyyy-MM-dd HH:mm:ss') * 1000  ts,
+        date_format(cancel_time, 'yyyy-MM-dd') ds
+    FROM (
+        SELECT 
+            after.id,
+            after.order_id,
+            after.cargo_type,
+            after.volume_length,
+            after.volume_width,
+            after.volume_height,
+            after.weight,
+            ds
+        FROM ods_order_cargo as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) cargo
+    JOIN (
+        SELECT 
+            after.id,
+            after.order_no,
+            after.status,
+            after.collect_type,
+            after.user_id,
+            after.receiver_complex_id,
+            after.receiver_province_id,
+            after.receiver_city_id,
+            after.receiver_district_id,
+            concat(substr(after.receiver_name, 1, 1), '*') receiver_name,
+            after.sender_complex_id,
+            after.sender_province_id,
+            after.sender_city_id,
+            after.sender_district_id,
+            concat(substr(after.sender_name, 1, 1), '*') sender_name,
+            after.cargo_num,
+            after.amount,
+            after.estimate_arrive_time,
+            after.distance,
+            concat(substr(after.update_time, 1, 10), ' ', substr(after.update_time, 12, 8)) cancel_time
+        FROM ods_order_info as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) info ON cargo.order_id = info.id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_cargo_type ON cargo.cargo_type = cast(dic_for_cargo_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_status ON info.status = cast(dic_for_status.id as string)
+    -- 修复：collect_type关联dic_for_collect_type自身id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_collect_type ON info.collect_type = cast(dic_for_collect_type.id as string)
+    """.format(ds)
+    df = spark.sql(sql)
+    insert_to_hive(df, "dwd_trade_order_cancel_detail_inc")
+
+
+def etl_dwd_trans_receive_detail_inc(spark, ds):
+    """物流域揽收事务事实表"""
+    sql = """
+    SELECT
+        cargo.id,
+        order_id,
+        cargo_type,
+        dic_for_cargo_type.name                 cargo_type_name,
+        volume_length,
+        volume_width,
+        volume_height,
+        weight,
+        receive_time,
+        order_no,
+        status,
+        dic_for_status.name                     status_name,
+        collect_type,
+        dic_for_collect_type.name               collect_type_name,
+        user_id,
+        receiver_complex_id,
+        receiver_province_id,
+        receiver_city_id,
+        receiver_district_id,
+        receiver_name,
+        sender_complex_id,
+        sender_province_id,
+        sender_city_id,
+        sender_district_id,
+        sender_name,
+        payment_type,
+        dic_for_payment_type.name               payment_type_name,
+        cargo_num,
+        amount,
+        case
+            when info.estimate_arrive_time is null or trim(info.estimate_arrive_time) = '' then null
+            when info.estimate_arrive_time rlike '^\\d+$' then date_format(
+                    from_utc_timestamp(
+                        to_timestamp(
+                            case when length(info.estimate_arrive_time) = 10 
+                                 then cast(info.estimate_arrive_time as bigint) 
+                                 else cast(info.estimate_arrive_time as bigint)/1000 
+                            end
+                        ), 
+                        'UTC'
+                    ),
+                    'yyyy-MM-dd HH:mm:ss'
+                )
+            else info.estimate_arrive_time
+            end as estimate_arrive_time,
+        distance,
+        unix_timestamp(receive_time, 'yyyy-MM-dd HH:mm:ss') * 1000  ts,
+        date_format(receive_time, 'yyyy-MM-dd') ds
+    FROM (
+        SELECT 
+            after.id,
+            after.order_id,
+            after.cargo_type,
+            after.volume_length,
+            after.volume_width,
+            after.volume_height,
+            after.weight,
+            ds
+        FROM ods_order_cargo as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) cargo
+    JOIN (
+        SELECT 
+            after.id,
+            after.order_no,
+            after.status,
+            after.collect_type,
+            after.user_id,
+            after.receiver_complex_id,
+            after.receiver_province_id,
+            after.receiver_city_id,
+            after.receiver_district_id,
+            concat(substr(after.receiver_name, 1, 1), '*') receiver_name,
+            after.sender_complex_id,
+            after.sender_province_id,
+            after.sender_city_id,
+            after.sender_district_id,
+            concat(substr(after.sender_name, 1, 1), '*') sender_name,
+            after.payment_type,
+            after.cargo_num,
+            after.amount,
+            after.estimate_arrive_time,
+            after.distance,
+            concat(substr(after.update_time, 1, 10), ' ', substr(after.update_time, 12, 8)) receive_time
+        FROM ods_order_info as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) info ON cargo.order_id = info.id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_cargo_type ON cargo.cargo_type = cast(dic_for_cargo_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_status ON info.status = cast(dic_for_status.id as string)
+    -- 修复：collect_type关联dic_for_collect_type自身id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_collect_type ON info.collect_type = cast(dic_for_collect_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_payment_type ON info.payment_type = cast(dic_for_payment_type.id as string)
+    """.format(ds)
+    df = spark.sql(sql)
+    insert_to_hive(df, "dwd_trans_receive_detail_inc")
+
+
+def etl_dwd_trans_dispatch_detail_inc(spark, ds):
+    """物流域发单事务事实表"""
+    sql = """
+    SELECT
+        cargo.id,
+        order_id,
+        cargo_type,
+        dic_for_cargo_type.name                 cargo_type_name,
+        volume_length,
+        volume_width,
+        volume_height,
+        weight,
+        dispatch_time,
+        order_no,
+        status,
+        dic_for_status.name                     status_name,
+        collect_type,
+        dic_for_collect_type.name               collect_type_name,
+        user_id,
+        receiver_complex_id,
+        receiver_province_id,
+        receiver_city_id,
+        receiver_district_id,
+        receiver_name,
+        sender_complex_id,
+        sender_province_id,
+        sender_city_id,
+        sender_district_id,
+        sender_name,
+        payment_type,
+        dic_for_payment_type.name               payment_type_name,
+        cargo_num,
+        amount,
+        estimate_arrive_time,
+        distance,
+        unix_timestamp(dispatch_time, 'yyyy-MM-dd HH:mm:ss') * 1000  ts,
+        date_format(dispatch_time, 'yyyy-MM-dd') ds
+    FROM (
+        SELECT 
+            after.id,
+            after.order_id,
+            after.cargo_type,
+            after.volume_length,
+            after.volume_width,
+            after.volume_height,
+            after.weight,
+            ds
+        FROM ods_order_cargo as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) cargo
+    JOIN (
+        SELECT 
+            after.id,
+            after.order_no,
+            after.status,
+            after.collect_type,
+            after.user_id,
+            after.receiver_complex_id,
+            after.receiver_province_id,
+            after.receiver_city_id,
+            after.receiver_district_id,
+            concat(substr(after.receiver_name, 1, 1), '*') receiver_name,
+            after.sender_complex_id,
+            after.sender_province_id,
+            after.sender_city_id,
+            after.sender_district_id,
+            concat(substr(after.sender_name, 1, 1), '*') sender_name,
+            after.payment_type,
+            after.cargo_num,
+            after.amount,
+            case
+                when after.estimate_arrive_time is null or trim(after.estimate_arrive_time) = '' then null
+                when after.estimate_arrive_time rlike '^\\d+$' then date_format(
+                        from_utc_timestamp(
+                            to_timestamp(
+                                case when length(after.estimate_arrive_time) = 10 
+                                     then cast(after.estimate_arrive_time as bigint) 
+                                     else cast(after.estimate_arrive_time as bigint)/1000 
+                                end
+                            ), 
+                            'UTC'
+                        ),
+                        'yyyy-MM-dd HH:mm:ss'
+                    )
+                else date_format(from_utc_timestamp(to_timestamp(after.estimate_arrive_time), 'UTC'), 'yyyy-MM-dd HH:mm:ss')
+                end as estimate_arrive_time,
+            after.distance,
+            concat(substr(after.update_time, 1, 10), ' ', substr(after.update_time, 12, 8)) dispatch_time
+        FROM ods_order_info as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) info ON cargo.order_id = info.id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_cargo_type ON cargo.cargo_type = cast(dic_for_cargo_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_status ON info.status = cast(dic_for_status.id as string)
+    -- 修复：collect_type关联dic_for_collect_type自身id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_collect_type ON info.collect_type = cast(dic_for_collect_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_payment_type ON info.payment_type = cast(dic_for_payment_type.id as string)
+    """.format(ds)
+    df = spark.sql(sql)
+    insert_to_hive(df, "dwd_trans_dispatch_detail_inc")
+
+
+def etl_dwd_trans_bound_finish_detail_inc(spark, ds):
+    """物流域转运完成事务事实表"""
+    sql = """
+    SELECT
+        cargo.id,
+        order_id,
+        cargo_type,
+        dic_for_cargo_type.name                 cargo_type_name,
+        volume_length,
+        volume_width,
+        volume_height,
+        weight,
+        bound_finish_time,
+        order_no,
+        status,
+        dic_for_status.name                     status_name,
+        collect_type,
+        dic_for_collect_type.name               collect_type_name,
+        user_id,
+        receiver_complex_id,
+        receiver_province_id,
+        receiver_city_id,
+        receiver_district_id,
+        receiver_name,
+        sender_complex_id,
+        sender_province_id,
+        sender_city_id,
+        sender_district_id,
+        sender_name,
+        payment_type,
+        dic_for_payment_type.name               payment_type_name,
+        cargo_num,
+        amount,
+        estimate_arrive_time,
+        distance,
+        unix_timestamp(bound_finish_time, 'yyyy-MM-dd HH:mm:ss') * 1000  ts,
+        date_format(bound_finish_time, 'yyyy-MM-dd') ds
+    FROM (
+        SELECT 
+            after.id,
+            after.order_id,
+            after.cargo_type,
+            after.volume_length,
+            after.volume_width,
+            after.volume_height,
+            after.weight,
+            ds
+        FROM ods_order_cargo as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) cargo
+    JOIN (
+        SELECT 
+            after.id,
+            after.order_no,
+            after.status,
+            after.collect_type,
+            after.user_id,
+            after.receiver_complex_id,
+            after.receiver_province_id,
+            after.receiver_city_id,
+            after.receiver_district_id,
+            concat(substr(after.receiver_name, 1, 1), '*') receiver_name,
+            after.sender_complex_id,
+            after.sender_province_id,
+            after.sender_city_id,
+            after.sender_district_id,
+            concat(substr(after.sender_name, 1, 1), '*') sender_name,
+            after.payment_type,
+            after.cargo_num,
+            after.amount,
+            case
+                when after.estimate_arrive_time is null or trim(after.estimate_arrive_time) = '' then null
+                when after.estimate_arrive_time rlike '^\\d+$' then date_format(
+                        from_utc_timestamp(
+                            to_timestamp(
+                                case when length(after.estimate_arrive_time) = 10 
+                                     then cast(after.estimate_arrive_time as bigint) 
+                                     else cast(after.estimate_arrive_time as bigint)/1000 
+                                end
+                            ), 
+                            'UTC'
+                        ),
+                        'yyyy-MM-dd HH:mm:ss'
+                    )
+                else date_format(from_utc_timestamp(to_timestamp(after.estimate_arrive_time), 'UTC'), 'yyyy-MM-dd HH:mm:ss')
+                end as estimate_arrive_time,
+            after.distance,
+            concat(substr(after.update_time, 1, 10), ' ', substr(after.update_time, 12, 8)) bound_finish_time
+        FROM ods_order_info as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) info ON cargo.order_id = info.id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_cargo_type ON cargo.cargo_type = cast(dic_for_cargo_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_status ON info.status = cast(dic_for_status.id as string)
+    -- 修复：collect_type关联dic_for_collect_type自身id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_collect_type ON info.collect_type = cast(dic_for_collect_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_payment_type ON info.payment_type = cast(dic_for_payment_type.id as string)
+    """.format(ds)
+    df = spark.sql(sql)
+    insert_to_hive(df, "dwd_trans_bound_finish_detail_inc")
+
+
+def etl_dwd_trans_deliver_suc_detail_inc(spark, ds):
+    """物流域派送成功事务事实表"""
+    sql = """
+    SELECT
+        cargo.id,
+        order_id,
+        cargo_type,
+        dic_for_cargo_type.name                 cargo_type_name,
+        volume_length,
+        volume_width,
+        volume_height,
+        weight,
+        deliver_suc_time,
+        order_no,
+        status,
+        dic_for_status.name                     status_name,
+        collect_type,
+        dic_for_collect_type.name               collect_type_name,
+        user_id,
+        receiver_complex_id,
+        receiver_province_id,
+        receiver_city_id,
+        receiver_district_id,
+        receiver_name,
+        sender_complex_id,
+        sender_province_id,
+        sender_city_id,
+        sender_district_id,
+        sender_name,
+        payment_type,
+        dic_for_payment_type.name               payment_type_name,
+        cargo_num,
+        amount,
+        estimate_arrive_time,
+        distance,
+        unix_timestamp(deliver_suc_time, 'yyyy-MM-dd HH:mm:ss') * 1000  ts,
+        date_format(deliver_suc_time, 'yyyy-MM-dd') ds
+    FROM (
+        SELECT 
+            after.id,
+            after.order_id,
+            after.cargo_type,
+            after.volume_length,
+            after.volume_width,
+            after.volume_height,
+            after.weight,
+            ds
+        FROM ods_order_cargo as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) cargo
+    JOIN (
+        SELECT 
+            after.id,
+            after.order_no,
+            after.status,
+            after.collect_type,
+            after.user_id,
+            after.receiver_complex_id,
+            after.receiver_province_id,
+            after.receiver_city_id,
+            after.receiver_district_id,
+            concat(substr(after.receiver_name, 1, 1), '*') receiver_name,
+            after.sender_complex_id,
+            after.sender_province_id,
+            after.sender_city_id,
+            after.sender_district_id,
+            concat(substr(after.sender_name, 1, 1), '*') sender_name,
+            after.payment_type,
+            after.cargo_num,
+            after.amount,
+            case
+                when after.estimate_arrive_time is null or trim(after.estimate_arrive_time) = '' then null
+                when after.estimate_arrive_time rlike '^\\d+$' then date_format(
+                        from_utc_timestamp(
+                            to_timestamp(
+                                case when length(after.estimate_arrive_time) = 10 
+                                     then cast(after.estimate_arrive_time as bigint) 
+                                     else cast(after.estimate_arrive_time as bigint)/1000 
+                                end
+                            ), 
+                            'UTC'
+                        ),
+                        'yyyy-MM-dd HH:mm:ss'
+                    )
+                else date_format(from_utc_timestamp(to_timestamp(after.estimate_arrive_time), 'UTC'), 'yyyy-MM-dd HH:mm:ss')
+                end as estimate_arrive_time,
+            after.distance,
+            concat(substr(after.update_time, 1, 10), ' ', substr(after.update_time, 12, 8)) deliver_suc_time
+        FROM ods_order_info as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) info ON cargo.order_id = info.id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_cargo_type ON cargo.cargo_type = cast(dic_for_cargo_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_status ON info.status = cast(dic_for_status.id as string)
+    -- 修复：collect_type关联dic_for_collect_type自身id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_collect_type ON info.collect_type = cast(dic_for_collect_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_payment_type ON info.payment_type = cast(dic_for_payment_type.id as string)
+    """.format(ds)
+    df = spark.sql(sql)
+    insert_to_hive(df, "dwd_trans_deliver_suc_detail_inc")
+
+
 def etl_dwd_trans_sign_detail_inc(spark, ds):
-    cargo_df = spark.sql("""
+    """物流域签收事务事实表"""
+    sql = """
+    SELECT
+        cargo.id,
+        order_id,
+        cargo_type,
+        dic_for_cargo_type.name                 cargo_type_name,
+        volume_length,
+        volume_width,
+        volume_height,
+        weight,
+        sign_time,
+        order_no,
+        status,
+        dic_for_status.name                     status_name,
+        collect_type,
+        dic_for_collect_type.name               collect_type_name,
+        user_id,
+        receiver_complex_id,
+        receiver_province_id,
+        receiver_city_id,
+        receiver_district_id,
+        receiver_name,
+        sender_complex_id,
+        sender_province_id,
+        sender_city_id,
+        sender_district_id,
+        sender_name,
+        payment_type,
+        dic_for_payment_type.name               payment_type_name,
+        cargo_num,
+        amount,
+        case
+            when info.estimate_arrive_time is null or trim(info.estimate_arrive_time) = '' then null
+            when info.estimate_arrive_time rlike '^\\d+$' then date_format(
+                    from_utc_timestamp(
+                        to_timestamp(
+                            case when length(info.estimate_arrive_time) = 10 
+                                 then cast(info.estimate_arrive_time as bigint) 
+                                 else cast(info.estimate_arrive_time as bigint)/1000 
+                            end
+                        ), 
+                        'UTC'
+                    ),
+                    'yyyy-MM-dd HH:mm:ss'
+                )
+            else info.estimate_arrive_time
+            end as estimate_arrive_time,
+        distance,
+        unix_timestamp(sign_time, 'yyyy-MM-dd HH:mm:ss') * 1000  ts,
+        date_format(sign_time, 'yyyy-MM-dd') ds
+    FROM (
         SELECT 
             after.id,
             after.order_id,
@@ -304,13 +842,11 @@ def etl_dwd_trans_sign_detail_inc(spark, ds):
             after.volume_width,
             after.volume_height,
             after.weight,
-            concat(substring(after.create_time, 1, 10), ' ', substring(after.create_time, 12, 8)) AS order_time,
-            unix_timestamp(now()) AS ts  -- 时间戳字段
-        FROM ods_order_cargo AS after
-        WHERE after.is_deleted = '0'
-    """)
-
-    info_df = spark.sql("""
+            ds
+        FROM ods_order_cargo as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) cargo
+    JOIN (
         SELECT 
             after.id,
             after.order_no,
@@ -321,100 +857,79 @@ def etl_dwd_trans_sign_detail_inc(spark, ds):
             after.receiver_province_id,
             after.receiver_city_id,
             after.receiver_district_id,
-            concat(substring(after.receiver_name, 1, 1), '*') AS receiver_name,
+            concat(substr(after.receiver_name, 1, 1), '*') receiver_name,
             after.sender_complex_id,
             after.sender_province_id,
             after.sender_city_id,
             after.sender_district_id,
-            concat(substring(after.sender_name, 1, 1), '*') AS sender_name,
+            concat(substr(after.sender_name, 1, 1), '*') sender_name,
             after.payment_type,
             after.cargo_num,
             after.amount,
-            date_format(
-                from_utc_timestamp(
-                    to_timestamp(CAST(after.estimate_arrive_time AS BIGINT) / 1000),
-                    'UTC'
-                ),
-                'yyyy-MM-dd HH:mm:ss'
-            ) AS estimate_arrive_time,
+            after.estimate_arrive_time,
             after.distance,
-            concat(substring(after.update_time, 1, 10), ' ', substring(after.update_time, 12, 8)) AS sign_time,
-            -- 新增end_date逻辑（参考其他表）
-            CASE 
-                WHEN after.status IN ('60080', '60999') THEN concat(substring(after.update_time, 1, 10))
-                ELSE '9999-12-31' 
-            END AS end_date
-        FROM ods_order_info AS after
-    """)
-
-    base_dic = spark.sql("SELECT id, name FROM ods_base_dic WHERE is_deleted = '0'")
-
-    result_df = cargo_df.alias("cargo") \
-        .join(info_df.alias("info"), F.col("cargo.order_id") == F.col("info.id"), "inner") \
-        .join(
-        base_dic.alias("cargo_type_dic"),
-        F.col("cargo.cargo_type") == F.col("cargo_type_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .join(
-        base_dic.alias("status_dic"),
-        F.col("info.status") == F.col("status_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .join(
-        base_dic.alias("collect_type_dic"),
-        F.col("info.collect_type") == F.col("collect_type_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .join(
-        base_dic.alias("payment_type_dic"),
-        F.col("info.payment_type") == F.col("payment_type_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .select(
-        F.col("cargo.id"),
-        F.col("cargo.order_id"),
-        F.col("cargo.cargo_type"),
-        F.col("cargo_type_dic.name").alias("cargo_type_name"),
-        F.col("cargo.volume_length"),
-        F.col("cargo.volume_width"),
-        F.col("cargo.volume_height"),
-        F.col("cargo.weight"),
-        F.col("info.sign_time"),
-        F.col("info.order_no"),
-        F.col("info.status"),
-        F.col("status_dic.name").alias("status_name"),
-        F.col("info.collect_type"),
-        F.col("collect_type_dic.name").alias("collect_type_name"),
-        F.col("info.user_id"),
-        F.col("info.receiver_complex_id"),
-        F.col("info.receiver_province_id"),
-        F.col("info.receiver_city_id"),
-        F.col("info.receiver_district_id"),
-        F.col("info.receiver_name"),
-        F.col("info.sender_complex_id"),
-        F.col("info.sender_province_id"),
-        F.col("info.sender_city_id"),
-        F.col("info.sender_district_id"),
-        F.col("info.sender_name"),
-        F.col("info.payment_type"),
-        F.col("payment_type_dic.name").alias("payment_type_name"),
-        F.col("info.cargo_num"),
-        F.col("info.amount"),
-        F.col("info.estimate_arrive_time"),
-        F.col("info.distance"),
-        F.col("cargo.ts").cast("bigint").alias("ts"),
-        F.date_format(F.col("cargo.order_time"), 'yyyy-MM-dd').alias("start_date"),  # 取自下单时间
-        F.col("info.end_date"),  # 取自info_df的end_date
-        F.date_format(F.col("info.sign_time"), 'yyyy-MM-dd').alias("ds")
-    )
-
-    insert_overwrite_partition(result_df, "dwd_trans_sign_detail_inc", "ds", ds, spark)
+            concat(substr(after.update_time, 1, 10), ' ', substr(after.update_time, 12, 8)) sign_time
+        FROM ods_order_info as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) info ON cargo.order_id = info.id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_cargo_type ON cargo.cargo_type = cast(dic_for_cargo_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_status ON info.status = cast(dic_for_status.id as string)
+    -- 修复：collect_type关联dic_for_collect_type自身id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_collect_type ON info.collect_type = cast(dic_for_collect_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_payment_type ON info.payment_type = cast(dic_for_payment_type.id as string)
+    """.format(ds)
+    df = spark.sql(sql)
+    insert_to_hive(df, "dwd_trans_sign_detail_inc")
 
 
-# ------------------------------ dwd_trade_order_process_inc ------------------------------
 def etl_dwd_trade_order_process_inc(spark, ds):
-    cargo_df = spark.sql("""
+    """交易域运单累积快照事实表"""
+    sql = """
+    SELECT
+        cargo.id,
+        order_id,
+        cargo_type,
+        dic_for_cargo_type.name               cargo_type_name,
+        volume_length,
+        volume_width,
+        volume_height,
+        weight,
+        order_time,
+        order_no,
+        status,
+        dic_for_status.name                   status_name,
+        collect_type,
+        dic_for_collect_type.name             collect_type_name,
+        user_id,
+        receiver_complex_id,
+        receiver_province_id,
+        receiver_city_id,
+        receiver_district_id,
+        receiver_name,
+        sender_complex_id,
+        sender_province_id,
+        sender_city_id,
+        sender_district_id,
+        sender_name,
+        payment_type,
+        dic_for_payment_type.name             payment_type_name,
+        cargo_num,
+        amount,
+        estimate_arrive_time,
+        distance,
+        unix_timestamp(order_time, 'yyyy-MM-dd HH:mm:ss') * 1000  ts,
+        date_format(order_time, 'yyyy-MM-dd') start_date,
+        end_date,
+        end_date                              ds
+    FROM (
         SELECT 
             after.id,
             after.order_id,
@@ -423,13 +938,12 @@ def etl_dwd_trade_order_process_inc(spark, ds):
             after.volume_width,
             after.volume_height,
             after.weight,
-            concat(substring(after.create_time, 1, 10), ' ', substring(after.create_time, 12, 8)) AS order_time,
-            unix_timestamp(now()) AS ts  -- 时间戳字段
-        FROM ods_order_cargo AS after
-        WHERE after.is_deleted = '0'
-    """)
-
-    info_df = spark.sql("""
+            concat(substr(after.create_time, 1, 10), ' ', substr(after.create_time, 12, 8)) order_time,
+            ds
+        FROM ods_order_cargo as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) cargo
+    JOIN (
         SELECT 
             after.id,
             after.order_no,
@@ -440,101 +954,120 @@ def etl_dwd_trade_order_process_inc(spark, ds):
             after.receiver_province_id,
             after.receiver_city_id,
             after.receiver_district_id,
-            concat(substring(after.receiver_name, 1, 1), '*') AS receiver_name,
+            concat(substr(after.receiver_name, 1, 1), '*') receiver_name,
             after.sender_complex_id,
             after.sender_province_id,
             after.sender_city_id,
             after.sender_district_id,
-            concat(substring(after.sender_name, 1, 1), '*') AS sender_name,
+            concat(substr(after.sender_name, 1, 1), '*') sender_name,
             after.payment_type,
             after.cargo_num,
             after.amount,
-            date_format(
-                from_utc_timestamp(
-                    to_timestamp(CAST(after.estimate_arrive_time AS BIGINT) / 1000),
-                    'UTC'
-                ),
-                'yyyy-MM-dd HH:mm:ss'
-            ) AS estimate_arrive_time,
+            case
+                when after.estimate_arrive_time is null or trim(after.estimate_arrive_time) = '' then null
+                when after.estimate_arrive_time rlike '^\\d+$' then date_format(
+                        from_utc_timestamp(
+                            to_timestamp(
+                                case when length(after.estimate_arrive_time) = 10 
+                                     then cast(after.estimate_arrive_time as bigint) 
+                                     else cast(after.estimate_arrive_time as bigint)/1000 
+                                end
+                            ), 
+                            'UTC'
+                        ),
+                        'yyyy-MM-dd HH:mm:ss'
+                    )
+                else date_format(from_utc_timestamp(to_timestamp(after.estimate_arrive_time), 'UTC'), 'yyyy-MM-dd HH:mm:ss')
+                end as estimate_arrive_time,
             after.distance,
-            CASE 
-                WHEN after.status IN ('60080', '60999') THEN concat(substring(after.update_time, 1, 10))
-                ELSE '9999-12-31' 
-            END AS end_date
-        FROM ods_order_info AS after
-        WHERE after.is_deleted = '0'
-    """)
-
-    base_dic = spark.sql("SELECT id, name FROM ods_base_dic WHERE is_deleted = '0'")
-
-    result_df = cargo_df.alias("cargo") \
-        .join(info_df.alias("info"), F.col("cargo.order_id") == F.col("info.id"), "inner") \
-        .join(
-        base_dic.alias("cargo_type_dic"),
-        F.col("cargo.cargo_type") == F.col("cargo_type_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .join(
-        base_dic.alias("status_dic"),
-        F.col("info.status") == F.col("status_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .join(
-        base_dic.alias("collect_type_dic"),
-        F.col("info.collect_type") == F.col("collect_type_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .join(
-        base_dic.alias("payment_type_dic"),
-        F.col("info.payment_type") == F.col("payment_type_dic.id").cast(StringType()),
-        "left"
-    ) \
-        .select(
-        F.col("cargo.id"),
-        F.col("cargo.order_id"),
-        F.col("cargo.cargo_type"),
-        F.col("cargo_type_dic.name").alias("cargo_type_name"),
-        F.col("cargo.volume_length"),
-        F.col("cargo.volume_width"),
-        F.col("cargo.volume_height"),
-        F.col("cargo.weight"),
-        F.col("cargo.order_time"),
-        F.col("info.order_no"),
-        F.col("info.status"),
-        F.col("status_dic.name").alias("status_name"),
-        F.col("info.collect_type"),
-        F.col("collect_type_dic.name").alias("collect_type_name"),
-        F.col("info.user_id"),
-        F.col("info.receiver_complex_id"),
-        F.col("info.receiver_province_id"),
-        F.col("info.receiver_city_id"),
-        F.col("info.receiver_district_id"),
-        F.col("info.receiver_name"),
-        F.col("info.sender_complex_id"),
-        F.col("info.sender_province_id"),
-        F.col("info.sender_city_id"),
-        F.col("info.sender_district_id"),
-        F.col("info.sender_name"),
-        F.col("info.payment_type"),
-        F.col("payment_type_dic.name").alias("payment_type_name"),
-        F.col("info.cargo_num"),
-        F.col("info.amount"),
-        F.col("info.estimate_arrive_time"),
-        F.col("info.distance"),
-        F.col("cargo.ts").cast("bigint").alias("ts"),  # 补充ts字段
-        F.date_format(F.col("cargo.order_time"), 'yyyy-MM-dd').alias("start_date"),
-        F.col("info.end_date"),
-        F.col("info.end_date").alias("ds")
-    )
-
-    # 移除partitionBy("ds")，仅保留insertInto
-    result_df.write.mode("overwrite").insertInto("dwd_trade_order_process_inc")
+            if(after.status = '60080' or after.status = '60999',
+               concat(substr(after.update_time, 1, 10)),
+               '9999-12-31')                               end_date
+        FROM ods_order_info as after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) info ON cargo.order_id = info.id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_cargo_type ON cargo.cargo_type = cast(dic_for_cargo_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_status ON info.status = cast(dic_for_status.id as string)
+    -- 修复：collect_type关联dic_for_collect_type自身id
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_collect_type ON info.collect_type = cast(dic_for_collect_type.id as string)
+    LEFT JOIN (
+        SELECT id, name FROM ods_base_dic WHERE is_deleted = '0' AND ds = '{0}'
+    ) dic_for_payment_type ON info.payment_type = cast(dic_for_payment_type.id as string)
+    """.format(ds)
+    df = spark.sql(sql)
+    insert_to_hive(df, "dwd_trade_order_process_inc")
 
 
-# ------------------------------ dwd_trans_trans_finish_inc ------------------------------
 def etl_dwd_trans_trans_finish_inc(spark, ds):
-    # 读取源表数据
-    info_df = spark.sql("""
+    """物流域运输事务事实表"""
+    sql = """
+    SELECT
+        info.id,
+        shift_id,
+        line_id,
+        start_org_id,
+        start_org_name,
+        end_org_id,
+        end_org_name,
+        order_num,
+        driver1_emp_id,
+        driver1_name,
+        driver2_emp_id,
+        driver2_name,
+        truck_id,
+        truck_no,
+        case
+            when info.actual_start_time_str is null or trim(info.actual_start_time_str) = '' then null
+            when info.actual_start_time_str rlike '^\\d+$' then date_format(
+                    from_utc_timestamp(
+                        to_timestamp(
+                            case when length(info.actual_start_time_str) = 10 
+                                 then cast(info.actual_start_time_str as bigint) 
+                                 else cast(info.actual_start_time_str as bigint)/1000 
+                            end
+                        ), 
+                        'UTC'
+                    ),
+                    'yyyy-MM-dd HH:mm:ss'
+                )
+            else info.actual_start_time_str
+            end as actual_start_time,
+        case
+            when info.actual_end_time_str is null or trim(info.actual_end_time_str) = '' then null
+            when info.actual_end_time_str rlike '^\\d+$' then date_format(
+                    from_utc_timestamp(
+                        to_timestamp(
+                            case when length(info.actual_end_time_str) = 10 
+                                 then cast(info.actual_end_time_str as bigint) 
+                                 else cast(info.actual_end_time_str as bigint)/1000 
+                            end
+                        ), 
+                        'UTC'
+                    ),
+                    'yyyy-MM-dd HH:mm:ss'
+                )
+            else info.actual_end_time_str
+            end as actual_end_time,
+        dim_tb.estimated_time as estimate_end_time,
+        actual_distance,
+        case
+            when info.actual_start_time_str is not null and info.actual_end_time_str is not null
+                then unix_timestamp(info.actual_end_time_str, 'yyyy-MM-dd HH:mm:ss')
+                - unix_timestamp(info.actual_start_time_str, 'yyyy-MM-dd HH:mm:ss')
+            else null
+            end as finish_dur_sec,
+        case
+            when info.actual_end_time_str rlike '^\\d+$' then cast(info.actual_end_time_str as bigint)
+            else unix_timestamp(info.actual_end_time_str, 'yyyy-MM-dd HH:mm:ss') * 1000
+            end as ts,
+        info.ds  -- 分区字段ds
+    FROM (
         SELECT 
             after.id,
             after.shift_id,
@@ -545,670 +1078,169 @@ def etl_dwd_trans_trans_finish_inc(spark, ds):
             after.end_org_name,
             after.order_num,
             after.driver1_emp_id,
-            concat(substring(after.driver1_name, 1, 1), '*') AS driver1_name,
+            concat(substr(after.driver1_name, 1, 1), '*') as driver1_name,
             after.driver2_emp_id,
-            concat(substring(after.driver2_name, 1, 1), '*') AS driver2_name,
+            concat(substr(after.driver2_name, 1, 1), '*') as driver2_name,
             after.truck_id,
-            md5(after.truck_no) AS truck_no,
-            date_format(
-                from_utc_timestamp(
-                    to_timestamp(CAST(after.actual_start_time AS BIGINT) / 1000),
-                    'UTC'
-                ),
-                'yyyy-MM-dd HH:mm:ss'
-            ) AS actual_start_time,
-            date_format(
-                from_utc_timestamp(
-                    to_timestamp(CAST(after.actual_end_time AS BIGINT) / 1000),
-                    'UTC'
-                ),
-                'yyyy-MM-dd HH:mm:ss'
-            ) AS actual_end_time,
+            md5(after.truck_no) as truck_no,
+            after.actual_start_time as actual_start_time_str,
+            after.actual_end_time as actual_end_time_str,
             after.actual_distance,
-            (CAST(after.actual_end_time AS BIGINT) - CAST(after.actual_start_time AS BIGINT)) / 1000 AS finish_dur_sec,
-            date_format(
-                from_utc_timestamp(
-                    to_timestamp(CAST(after.actual_end_time AS BIGINT) / 1000),
-                    'UTC'
-                ),
-                'yyyy-MM-dd'
-            ) AS ds,
-            unix_timestamp(now()) AS ts  -- 时间戳字段
-        FROM ods_transport_task AS after
-    """)
-
-    # 关联维度表
-    dim_shift = spark.sql("SELECT id, estimated_time FROM dim_shift_full")
-
-    result_df = info_df.alias("info") \
-        .join(dim_shift.alias("dim_tb"), F.col("info.shift_id") == F.col("dim_tb.id"), "left") \
-        .select(
-        F.col("info.id"),
-        F.col("info.shift_id"),
-        F.col("info.line_id"),
-        F.col("info.start_org_id"),
-        F.col("info.start_org_name"),
-        F.col("info.end_org_id"),
-        F.col("info.end_org_name"),
-        F.col("info.order_num"),
-        F.col("info.driver1_emp_id"),
-        F.col("info.driver1_name"),
-        F.col("info.driver2_emp_id"),
-        F.col("info.driver2_name"),
-        F.col("info.truck_id"),
-        F.col("info.truck_no"),
-        F.col("info.actual_start_time"),
-        F.col("info.actual_end_time"),
-        F.col("dim_tb.estimated_time").alias("estimate_end_time"),
-        F.col("info.actual_distance"),
-        F.col("info.finish_dur_sec"),
-        F.col("info.ts").cast("bigint").alias("ts"),  # 补充ts字段
-        F.col("info.ds")
-    ) \
-        .limit(200)
-
-    insert_overwrite_partition(result_df, "dwd_trans_trans_finish_inc", "ds", ds, spark)
+            case
+                when after.actual_end_time rlike '^\\d+$' then date_format(
+                        from_utc_timestamp(
+                            to_timestamp(
+                                case when length(after.actual_end_time) = 10 
+                                     then cast(after.actual_end_time as bigint) 
+                                     else cast(after.actual_end_time as bigint)/1000 
+                                end
+                            ), 
+                            'UTC'
+                        ),
+                        'yyyy-MM-dd'
+                    )
+                else date_format(from_utc_timestamp(to_timestamp(after.actual_end_time), 'UTC'), 'yyyy-MM-dd')
+                end as ds
+        FROM ods_transport_task after
+        WHERE is_deleted = '0' AND ds = '{0}'
+    ) info
+    LEFT JOIN (
+        SELECT id, estimated_time FROM dim_shift_full WHERE ds = '{0}'
+    ) dim_tb ON info.shift_id = dim_tb.id
+    LIMIT 200
+    """.format(ds)
+    df = spark.sql(sql)
+    insert_to_hive(df, "dwd_trans_trans_finish_inc")
 
 
-# ------------------------------ dwd_bound_inbound_inc ------------------------------
 def etl_dwd_bound_inbound_inc(spark, ds):
-    # 读取源表数据
-    df = spark.sql("""
-        SELECT 
-            after.id,
-            after.order_id,
-            after.org_id,
-            date_format(
-                from_utc_timestamp(
-                    to_timestamp(CAST(after.inbound_time AS BIGINT) / 1000),
-                    'UTC'
-                ),
-                'yyyy-MM-dd HH:mm:ss'
-            ) AS inbound_time,
-            after.inbound_emp_id,
-            unix_timestamp(now()) AS ts  -- 时间戳字段
-        FROM ods_order_org_bound AS after
-        LIMIT 250
-    """)
+    """中转域入库事务事实表"""
+    sql = """
+    SELECT
+        after.id,
+        after.order_id,
+        after.org_id,
+        case
+            when after.inbound_time is null or trim(after.inbound_time) = '' then null
+            when after.inbound_time rlike '^\\d+$' then date_format(
+                    from_utc_timestamp(
+                        to_timestamp(
+                            case when length(after.inbound_time) = 10 
+                                 then cast(after.inbound_time as bigint) 
+                                 else cast(after.inbound_time as bigint)/1000 
+                            end
+                        ), 
+                        'UTC'
+                    ),
+                    'yyyy-MM-dd HH:mm:ss'
+                )
+            else date_format(from_utc_timestamp(to_timestamp(after.inbound_time), 'UTC'), 'yyyy-MM-dd HH:mm:ss')
+            end as inbound_time,
+        after.inbound_emp_id,
+        '{0}' ds
+    FROM ods_order_org_bound after
+    WHERE is_deleted = '0' AND ds = '{0}'
+    LIMIT 250
+    """.format(ds)
+    df = spark.sql(sql)
+    insert_to_hive(df, "dwd_bound_inbound_inc")
 
-    insert_overwrite_partition(df, "dwd_bound_inbound_inc", "ds", ds, spark)
 
-
-# ------------------------------ dwd_bound_sort_inc ------------------------------
 def etl_dwd_bound_sort_inc(spark, ds):
-    # 读取源表数据
-    df = spark.sql("""
-        SELECT 
-            after.id,
-            after.order_id,
-            after.org_id,
-            date_format(
-                from_utc_timestamp(
-                    to_timestamp(CAST(after.sort_time AS BIGINT) / 1000),
-                    'UTC'
-                ),
-                'yyyy-MM-dd HH:mm:ss'
-            ) AS sort_time,
-            after.sorter_emp_id,
-            unix_timestamp(now()) AS ts  -- 时间戳字段
-        FROM ods_order_org_bound AS after
-        WHERE after.sort_time IS NOT NULL
-        LIMIT 250
-    """)
+    """中转域分拣事务事实表"""
+    sql = """
+    SELECT
+        after.id,
+        after.order_id,
+        after.org_id,
+        case
+            when after.sort_time is null or trim(after.sort_time) = '' then null
+            when after.sort_time rlike '^\\d+$' then date_format(
+                    from_utc_timestamp(
+                        to_timestamp(
+                            case when length(after.sort_time) = 10 
+                                 then cast(after.sort_time as bigint) 
+                                 else cast(after.sort_time as bigint)/1000 
+                            end
+                        ), 
+                        'UTC'
+                    ),
+                    'yyyy-MM-dd HH:mm:ss'
+                )
+            else after.sort_time
+            end as sort_time,
+        after.sorter_emp_id,
+        '{0}' ds
+    FROM ods_order_org_bound as after
+    WHERE is_deleted = '0' AND ds = '{0}' AND after.sort_time is not null
+    LIMIT 250
+    """.format(ds)
+    df = spark.sql(sql)
+    insert_to_hive(df, "dwd_bound_sort_inc")
 
-    insert_overwrite_partition(df, "dwd_bound_sort_inc", "ds", ds, spark)
 
-
-# ------------------------------ dwd_bound_outbound_inc ------------------------------
 def etl_dwd_bound_outbound_inc(spark, ds):
-    # 读取源表数据
-    df = spark.sql("""
-        SELECT 
-            after.id,
-            after.order_id,
-            after.org_id,
-            date_format(
-                from_utc_timestamp(
-                    to_timestamp(CAST(after.outbound_time AS BIGINT) / 1000),
-                    'UTC'
-                ),
-                'yyyy-MM-dd HH:mm:ss'
-            ) AS outbound_time,
-            after.outbound_emp_id,
-            unix_timestamp(now()) AS ts  -- 时间戳字段
-        FROM ods_order_org_bound AS after
-        WHERE after.outbound_time IS NOT NULL
-    """)
-
-    insert_overwrite_partition(df, "dwd_bound_outbound_inc", "ds", ds, spark)
-
-
-# 未实现的ETL函数
-def etl_dwd_trade_order_cancel_detail_inc(spark, ds):
-    pass
-
-
-def etl_dwd_trans_receive_detail_inc(spark, ds):
-    pass
-
-
-def etl_dwd_trans_dispatch_detail_inc(spark, ds):
-    pass
+    """中转域出库事务事实表"""
+    sql = """
+    SELECT
+        after.id,
+        after.order_id,
+        after.org_id,
+        case
+            when after.outbound_time is null or trim(after.outbound_time) = '' then null
+            when after.outbound_time rlike '^\\d+$' then date_format(
+                    from_utc_timestamp(
+                        to_timestamp(
+                            case when length(after.outbound_time) = 10 
+                                 then cast(after.outbound_time as bigint) 
+                                 else cast(after.outbound_time as bigint)/1000 
+                            end
+                        ), 
+                        'UTC'
+                    ),
+                    'yyyy-MM-dd HH:mm:ss'
+                )
+            else after.outbound_time
+            end as outbound_time,
+        after.outbound_emp_id,
+        '{0}' ds
+    FROM ods_order_org_bound as after
+    WHERE is_deleted = '0' AND ds = '{0}' AND after.outbound_time is not null
+    """.format(ds)
+    df = spark.sql(sql)
+    insert_to_hive(df, "dwd_bound_outbound_inc")
 
 
-def etl_dwd_trans_bound_finish_detail_inc(spark, ds):
-    pass
-
-
-def etl_dwd_trans_deliver_suc_detail_inc(spark, ds):
-    pass
-
-
-# 主函数
-def main(ds):
+def main(partition_date):
+    """主函数：执行所有DWD表的ETL"""
     spark = get_spark_session()
+    # 按业务域顺序执行
+    # 交易域
+    etl_dwd_trade_order_detail_inc(spark, partition_date)
+    etl_dwd_trade_pay_suc_detail_inc(spark, partition_date)
+    etl_dwd_trade_order_cancel_detail_inc(spark, partition_date)
+    etl_dwd_trade_order_process_inc(spark, partition_date)
 
-    # 1. dwd_trade_order_detail_inc
-    schema = [
-        ("id", "bigint", "运单明细ID"),
-        ("order_id", "string", "运单ID"),
-        ("cargo_type", "string", "货物类型ID"),
-        ("cargo_type_name", "string", "货物类型名称"),
-        ("volume_length", "bigint", "长cm"),
-        ("volume_width", "bigint", "宽cm"),
-        ("volume_height", "bigint", "高cm"),
-        ("weight", "decimal(16,2)", "重量 kg"),
-        ("order_time", "string", "下单时间"),
-        ("order_no", "string", "运单号"),
-        ("status", "string", "运单状态"),
-        ("status_name", "string", "运单状态名称"),
-        ("collect_type", "string", "取件类型"),
-        ("collect_type_name", "string", "取件类型名称"),
-        ("user_id", "bigint", "用户ID"),
-        ("receiver_complex_id", "bigint", "收件人小区id"),
-        ("receiver_province_id", "string", "收件人省份id"),
-        ("receiver_city_id", "string", "收件人城市id"),
-        ("receiver_district_id", "string", "收件人区县id"),
-        ("receiver_name", "string", "收件人姓名"),
-        ("sender_complex_id", "bigint", "发件人小区id"),
-        ("sender_province_id", "string", "发件人省份id"),
-        ("sender_city_id", "string", "发件人城市id"),
-        ("sender_district_id", "string", "发件人区县id"),
-        ("sender_name", "string", "发件人姓名"),
-        ("cargo_num", "bigint", "货物个数"),
-        ("amount", "decimal(16,2)", "金额"),
-        ("estimate_arrive_time", "string", "预计到达时间"),
-        ("distance", "decimal(16,2)", "距离"),
-        ("ts", "bigint", "时间戳")
-    ]
-    partition_cols = [("ds", "string", "统计日期")]
-    create_external_table(
-        spark,
-        "dwd_trade_order_detail_inc",
-        schema,
-        "/warehouse/tms/dwd/dwd_trade_order_detail_inc",
-        partition_cols
-    )
-    etl_dwd_trade_order_detail_inc(spark, ds)
+    # 物流域
+    etl_dwd_trans_receive_detail_inc(spark, partition_date)
+    etl_dwd_trans_dispatch_detail_inc(spark, partition_date)
+    etl_dwd_trans_bound_finish_detail_inc(spark, partition_date)
+    etl_dwd_trans_deliver_suc_detail_inc(spark, partition_date)
+    etl_dwd_trans_sign_detail_inc(spark, partition_date)
+    etl_dwd_trans_trans_finish_inc(spark, partition_date)
 
-    # 2. dwd_trade_pay_suc_detail_inc
-    schema = [
-        ("id", "bigint", "运单明细ID"),
-        ("order_id", "string", "运单ID"),
-        ("cargo_type", "string", "货物类型ID"),
-        ("cargo_type_name", "string", "货物类型名称"),
-        ("volume_length", "bigint", "长cm"),
-        ("volume_width", "bigint", "宽cm"),
-        ("volume_height", "bigint", "高cm"),
-        ("weight", "decimal(16,2)", "重量 kg"),
-        ("payment_time", "string", "支付时间"),
-        ("order_no", "string", "运单号"),
-        ("status", "string", "运单状态"),
-        ("status_name", "string", "运单状态名称"),
-        ("collect_type", "string", "取件类型"),
-        ("collect_type_name", "string", "取件类型名称"),
-        ("user_id", "bigint", "用户ID"),
-        ("receiver_complex_id", "bigint", "收件人小区id"),
-        ("receiver_province_id", "string", "收件人省份id"),
-        ("receiver_city_id", "string", "收件人城市id"),
-        ("receiver_district_id", "string", "收件人区县id"),
-        ("receiver_name", "string", "收件人姓名"),
-        ("sender_complex_id", "bigint", "发件人小区id"),
-        ("sender_province_id", "string", "发件人省份id"),
-        ("sender_city_id", "string", "发件人城市id"),
-        ("sender_district_id", "string", "发件人区县id"),
-        ("sender_name", "string", "发件人姓名"),
-        ("payment_type", "string", "支付方式"),
-        ("payment_type_name", "string", "支付方式名称"),
-        ("cargo_num", "bigint", "货物个数"),
-        ("amount", "decimal(16,2)", "金额"),
-        ("estimate_arrive_time", "string", "预计到达时间"),
-        ("distance", "decimal(16,2)", "距离"),
-        ("ts", "bigint", "时间戳")
-    ]
-    partition_cols = [("ds", "string", "统计日期")]
-    create_external_table(
-        spark,
-        "dwd_trade_pay_suc_detail_inc",
-        schema,
-        "/warehouse/tms/dwd/dwd_trade_pay_suc_detail_inc",
-        partition_cols
-    )
-    etl_dwd_trade_pay_suc_detail_inc(spark, ds)
+    # 中转域
+    etl_dwd_bound_inbound_inc(spark, partition_date)
+    etl_dwd_bound_sort_inc(spark, partition_date)
+    etl_dwd_bound_outbound_inc(spark, partition_date)
 
-    # 3. dwd_trade_order_cancel_detail_inc
-    schema = [
-        ("id", "bigint", "运单明细ID"),
-        ("order_id", "string", "运单ID"),
-        ("cargo_type", "string", "货物类型ID"),
-        ("cargo_type_name", "string", "货物类型名称"),
-        ("volume_length", "bigint", "长cm"),
-        ("volume_width", "bigint", "宽cm"),
-        ("volume_height", "bigint", "高cm"),
-        ("weight", "decimal(16,2)", "重量 kg"),
-        ("cancel_time", "string", "取消时间"),
-        ("order_no", "string", "运单号"),
-        ("status", "string", "运单状态"),
-        ("status_name", "string", "运单状态名称"),
-        ("collect_type", "string", "取件类型"),
-        ("collect_type_name", "string", "取件类型名称"),
-        ("user_id", "bigint", "用户ID"),
-        ("receiver_complex_id", "bigint", "收件人小区id"),
-        ("receiver_province_id", "string", "收件人省份id"),
-        ("receiver_city_id", "string", "收件人城市id"),
-        ("receiver_district_id", "string", "收件人区县id"),
-        ("receiver_name", "string", "收件人姓名"),
-        ("sender_complex_id", "bigint", "发件人小区id"),
-        ("sender_province_id", "string", "发件人省份id"),
-        ("sender_city_id", "string", "发件人城市id"),
-        ("sender_district_id", "string", "发件人区县id"),
-        ("sender_name", "string", "发件人姓名"),
-        ("cargo_num", "bigint", "货物个数"),
-        ("amount", "decimal(16,2)", "金额"),
-        ("estimate_arrive_time", "string", "预计到达时间"),
-        ("distance", "decimal(16,2)", "距离"),
-        ("ts", "bigint", "时间戳")
-    ]
-    partition_cols = [("ds", "string", "统计日期")]
-    create_external_table(
-        spark,
-        "dwd_trade_order_cancel_detail_inc",
-        schema,
-        "/warehouse/tms/dwd/dwd_trade_order_cancel_detail_inc",
-        partition_cols
-    )
-    etl_dwd_trade_order_cancel_detail_inc(spark, ds)
-
-    # 4. dwd_trans_receive_detail_inc
-    schema = [
-        ("id", "bigint", "运单明细ID"),
-        ("order_id", "string", "运单ID"),
-        ("cargo_type", "string", "货物类型ID"),
-        ("cargo_type_name", "string", "货物类型名称"),
-        ("volume_length", "bigint", "长cm"),
-        ("volume_width", "bigint", "宽cm"),
-        ("volume_height", "bigint", "高cm"),
-        ("weight", "decimal(16,2)", "重量 kg"),
-        ("receive_time", "string", "揽收时间"),
-        ("order_no", "string", "运单号"),
-        ("status", "string", "运单状态"),
-        ("status_name", "string", "运单状态名称"),
-        ("collect_type", "string", "取件类型"),
-        ("collect_type_name", "string", "取件类型名称"),
-        ("user_id", "bigint", "用户ID"),
-        ("receiver_complex_id", "bigint", "收件人小区id"),
-        ("receiver_province_id", "string", "收件人省份id"),
-        ("receiver_city_id", "string", "收件人城市id"),
-        ("receiver_district_id", "string", "收件人区县id"),
-        ("receiver_name", "string", "收件人姓名"),
-        ("sender_complex_id", "bigint", "发件人小区id"),
-        ("sender_province_id", "string", "发件人省份id"),
-        ("sender_city_id", "string", "发件人城市id"),
-        ("sender_district_id", "string", "发件人区县id"),
-        ("sender_name", "string", "发件人姓名"),
-        ("payment_type", "string", "支付方式"),
-        ("payment_type_name", "string", "支付方式名称"),
-        ("cargo_num", "bigint", "货物个数"),
-        ("amount", "decimal(16,2)", "金额"),
-        ("estimate_arrive_time", "string", "预计到达时间"),
-        ("distance", "decimal(16,2)", "距离"),
-        ("ts", "bigint", "时间戳")
-    ]
-    partition_cols = [("ds", "string", "统计日期")]
-    create_external_table(
-        spark,
-        "dwd_trans_receive_detail_inc",
-        schema,
-        "/warehouse/tms/dwd/dwd_trans_receive_detail_inc",
-        partition_cols
-    )
-    etl_dwd_trans_receive_detail_inc(spark, ds)
-
-    # 5. dwd_trans_dispatch_detail_inc
-    schema = [
-        ("id", "bigint", "运单明细ID"),
-        ("order_id", "string", "运单ID"),
-        ("cargo_type", "string", "货物类型ID"),
-        ("cargo_type_name", "string", "货物类型名称"),
-        ("volume_length", "bigint", "长cm"),
-        ("volume_width", "bigint", "宽cm"),
-        ("volume_height", "bigint", "高cm"),
-        ("weight", "decimal(16,2)", "重量 kg"),
-        ("dispatch_time", "string", "发单时间"),
-        ("order_no", "string", "运单号"),
-        ("status", "string", "运单状态"),
-        ("status_name", "string", "运单状态名称"),
-        ("collect_type", "string", "取件类型"),
-        ("collect_type_name", "string", "取件类型名称"),
-        ("user_id", "bigint", "用户ID"),
-        ("receiver_complex_id", "bigint", "收件人小区id"),
-        ("receiver_province_id", "string", "收件人省份id"),
-        ("receiver_city_id", "string", "收件人城市id"),
-        ("receiver_district_id", "string", "收件人区县id"),
-        ("receiver_name", "string", "收件人姓名"),
-        ("sender_complex_id", "bigint", "发件人小区id"),
-        ("sender_province_id", "string", "发件人省份id"),
-        ("sender_city_id", "string", "发件人城市id"),
-        ("sender_district_id", "string", "发件人区县id"),
-        ("sender_name", "string", "发件人姓名"),
-        ("payment_type", "string", "支付方式"),
-        ("payment_type_name", "string", "支付方式名称"),
-        ("cargo_num", "bigint", "货物个数"),
-        ("amount", "decimal(16,2)", "金额"),
-        ("estimate_arrive_time", "string", "预计到达时间"),
-        ("distance", "decimal(16,2)", "距离"),
-        ("ts", "bigint", "时间戳")
-    ]
-    partition_cols = [("ds", "string", "统计日期")]
-    create_external_table(
-        spark,
-        "dwd_trans_dispatch_detail_inc",
-        schema,
-        "/warehouse/tms/dwd/dwd_trans_dispatch_detail_inc",
-        partition_cols
-    )
-    etl_dwd_trans_dispatch_detail_inc(spark, ds)
-
-    # 6. dwd_trans_bound_finish_detail_inc
-    schema = [
-        ("id", "bigint", "运单明细ID"),
-        ("order_id", "string", "运单ID"),
-        ("cargo_type", "string", "货物类型ID"),
-        ("cargo_type_name", "string", "货物类型名称"),
-        ("volume_length", "bigint", "长cm"),
-        ("volume_width", "bigint", "宽cm"),
-        ("volume_height", "bigint", "高cm"),
-        ("weight", "decimal(16,2)", "重量 kg"),
-        ("bound_finish_time", "string", "转运完成时间"),
-        ("order_no", "string", "运单号"),
-        ("status", "string", "运单状态"),
-        ("status_name", "string", "运单状态名称"),
-        ("collect_type", "string", "取件类型"),
-        ("collect_type_name", "string", "取件类型名称"),
-        ("user_id", "bigint", "用户ID"),
-        ("receiver_complex_id", "bigint", "收件人小区id"),
-        ("receiver_province_id", "string", "收件人省份id"),
-        ("receiver_city_id", "string", "收件人城市id"),
-        ("receiver_district_id", "string", "收件人区县id"),
-        ("receiver_name", "string", "收件人姓名"),
-        ("sender_complex_id", "bigint", "发件人小区id"),
-        ("sender_province_id", "string", "发件人省份id"),
-        ("sender_city_id", "string", "发件人城市id"),
-        ("sender_district_id", "string", "发件人区县id"),
-        ("sender_name", "string", "发件人姓名"),
-        ("payment_type", "string", "支付方式"),
-        ("payment_type_name", "string", "支付方式名称"),
-        ("cargo_num", "bigint", "货物个数"),
-        ("amount", "decimal(16,2)", "金额"),
-        ("estimate_arrive_time", "string", "预计到达时间"),
-        ("distance", "decimal(16,2)", "距离"),
-        ("ts", "bigint", "时间戳")
-    ]
-    partition_cols = [("ds", "string", "统计日期")]
-    create_external_table(
-        spark,
-        "dwd_trans_bound_finish_detail_inc",
-        schema,
-        "/warehouse/tms/dwd/dwd_trans_bound_finish_detail_inc",
-        partition_cols
-    )
-    etl_dwd_trans_bound_finish_detail_inc(spark, ds)
-
-    # 7. dwd_trans_deliver_suc_detail_inc
-    schema = [
-        ("id", "bigint", "运单明细ID"),
-        ("order_id", "string", "运单ID"),
-        ("cargo_type", "string", "货物类型ID"),
-        ("cargo_type_name", "string", "货物类型名称"),
-        ("volume_length", "bigint", "长cm"),
-        ("volume_width", "bigint", "宽cm"),
-        ("volume_height", "bigint", "高cm"),
-        ("weight", "decimal(16,2)", "重量 kg"),
-        ("deliver_suc_time", "string", "派送成功时间"),
-        ("order_no", "string", "运单号"),
-        ("status", "string", "运单状态"),
-        ("status_name", "string", "运单状态名称"),
-        ("collect_type", "string", "取件类型"),
-        ("collect_type_name", "string", "取件类型名称"),
-        ("user_id", "bigint", "用户ID"),
-        ("receiver_complex_id", "bigint", "收件人小区id"),
-        ("receiver_province_id", "string", "收件人省份id"),
-        ("receiver_city_id", "string", "收件人城市id"),
-        ("receiver_district_id", "string", "收件人区县id"),
-        ("receiver_name", "string", "收件人姓名"),
-        ("sender_complex_id", "bigint", "发件人小区id"),
-        ("sender_province_id", "string", "发件人省份id"),
-        ("sender_city_id", "string", "发件人城市id"),
-        ("sender_district_id", "string", "发件人区县id"),
-        ("sender_name", "string", "发件人姓名"),
-        ("payment_type", "string", "支付方式"),
-        ("payment_type_name", "string", "支付方式名称"),
-        ("cargo_num", "bigint", "货物个数"),
-        ("amount", "decimal(16,2)", "金额"),
-        ("estimate_arrive_time", "string", "预计到达时间"),
-        ("distance", "decimal(16,2)", "距离"),
-        ("ts", "bigint", "时间戳")
-    ]
-    partition_cols = [("ds", "string", "统计日期")]
-    create_external_table(
-        spark,
-        "dwd_trans_deliver_suc_detail_inc",
-        schema,
-        "/warehouse/tms/dwd/dwd_trans_deliver_suc_detail_inc",
-        partition_cols
-    )
-    etl_dwd_trans_deliver_suc_detail_inc(spark, ds)
-
-    # 8. dwd_trans_sign_detail_inc
-    schema = [
-        ("id", "bigint", "运单明细ID"),
-        ("order_id", "string", "运单ID"),
-        ("cargo_type", "string", "货物类型ID"),
-        ("cargo_type_name", "string", "货物类型名称"),
-        ("volume_length", "bigint", "长cm"),
-        ("volume_width", "bigint", "宽cm"),
-        ("volume_height", "bigint", "高cm"),
-        ("weight", "decimal(16,2)", "重量 kg"),
-        ("sign_time", "string", "签收时间"),
-        ("order_no", "string", "运单号"),
-        ("status", "string", "运单状态"),
-        ("status_name", "string", "运单状态名称"),
-        ("collect_type", "string", "取件类型"),
-        ("collect_type_name", "string", "取件类型名称"),
-        ("user_id", "bigint", "用户ID"),
-        ("receiver_complex_id", "bigint", "收件人小区id"),
-        ("receiver_province_id", "string", "收件人省份id"),
-        ("receiver_city_id", "string", "收件人城市id"),
-        ("receiver_district_id", "string", "收件人区县id"),
-        ("receiver_name", "string", "收件人姓名"),
-        ("sender_complex_id", "bigint", "发件人小区id"),
-        ("sender_province_id", "string", "发件人省份id"),
-        ("sender_city_id", "string", "发件人城市id"),
-        ("sender_district_id", "string", "发件人区县id"),
-        ("sender_name", "string", "发件人姓名"),
-        ("payment_type", "string", "支付方式"),
-        ("payment_type_name", "string", "支付方式名称"),
-        ("cargo_num", "bigint", "货物个数"),
-        ("amount", "decimal(16,2)", "金额"),
-        ("estimate_arrive_time", "string", "预计到达时间"),
-        ("distance", "decimal(16,2)", "距离"),
-        ("ts", "bigint", "时间戳"),
-        ("start_date", "string", "开始日期"),
-        ("end_date", "string", "结束日期")
-    ]
-    partition_cols = [("ds", "string", "统计日期")]
-    create_external_table(
-        spark,
-        "dwd_trans_sign_detail_inc",
-        schema,
-        "/warehouse/tms/dwd/dwd_trans_sign_detail_inc",
-        partition_cols
-    )
-    etl_dwd_trans_sign_detail_inc(spark, ds)
-
-    # 9. dwd_trade_order_process_inc
-    schema = [
-        ("id", "bigint", "运单明细ID"),
-        ("order_id", "string", "运单ID"),
-        ("cargo_type", "string", "货物类型ID"),
-        ("cargo_type_name", "string", "货物类型名称"),
-        ("volume_length", "bigint", "长cm"),
-        ("volume_width", "bigint", "宽cm"),
-        ("volume_height", "bigint", "高cm"),
-        ("weight", "decimal(16,2)", "重量 kg"),
-        ("order_time", "string", "下单时间"),
-        ("order_no", "string", "运单号"),
-        ("status", "string", "运单状态"),
-        ("status_name", "string", "运单状态名称"),
-        ("collect_type", "string", "取件类型"),
-        ("collect_type_name", "string", "取件类型名称"),
-        ("user_id", "bigint", "用户ID"),
-        ("receiver_complex_id", "bigint", "收件人小区id"),
-        ("receiver_province_id", "string", "收件人省份id"),
-        ("receiver_city_id", "string", "收件人城市id"),
-        ("receiver_district_id", "string", "收件人区县id"),
-        ("receiver_name", "string", "收件人姓名"),
-        ("sender_complex_id", "bigint", "发件人小区id"),
-        ("sender_province_id", "string", "发件人省份id"),
-        ("sender_city_id", "string", "发件人城市id"),
-        ("sender_district_id", "string", "发件人区县id"),
-        ("sender_name", "string", "发件人姓名"),
-        ("payment_type", "string", "支付方式"),
-        ("payment_type_name", "string", "支付方式名称"),
-        ("cargo_num", "bigint", "货物个数"),
-        ("amount", "decimal(16,2)", "金额"),
-        ("estimate_arrive_time", "string", "预计到达时间"),
-        ("distance", "decimal(16,2)", "距离"),
-        ("ts", "bigint", "时间戳"),
-        ("start_date", "string", "开始日期"),
-        ("end_date", "string", "结束日期")
-    ]
-    partition_cols = [("ds", "string", "统计日期")]
-    create_external_table(
-        spark,
-        "dwd_trade_order_process_inc",
-        schema,
-        "/warehouse/tms/dwd/dwd_order_process",
-        partition_cols
-    )
-    etl_dwd_trade_order_process_inc(spark, ds)
-
-    # 10. dwd_trans_trans_finish_inc
-    schema = [
-        ("id", "bigint", "运输任务ID"),
-        ("shift_id", "bigint", "车次ID"),
-        ("line_id", "bigint", "路线ID"),
-        ("start_org_id", "bigint", "起始机构ID"),
-        ("start_org_name", "string", "起始机构名称"),
-        ("end_org_id", "bigint", "目的机构ID"),
-        ("end_org_name", "string", "目的机构名称"),
-        ("order_num", "bigint", "运单个数"),
-        ("driver1_emp_id", "bigint", "司机1ID"),
-        ("driver1_name", "string", "司机1名称"),
-        ("driver2_emp_id", "bigint", "司机2ID"),
-        ("driver2_name", "string", "司机2名称"),
-        ("truck_id", "bigint", "卡车ID"),
-        ("truck_no", "string", "卡车号牌"),
-        ("actual_start_time", "string", "实际启动时间"),
-        ("actual_end_time", "string", "实际到达时间"),
-        ("estimate_end_time", "string", "预估到达时间"),
-        ("actual_distance", "decimal(16,2)", "实际行驶距离"),
-        ("finish_dur_sec", "bigint", "运输时长(秒)"),
-        ("ts", "bigint", "时间戳")
-    ]
-    partition_cols = [("ds", "string", "统计日期")]
-    create_external_table(
-        spark,
-        "dwd_trans_trans_finish_inc",
-        schema,
-        "/warehouse/tms/dwd/dwd_trans_trans_finish_inc",
-        partition_cols
-    )
-    etl_dwd_trans_trans_finish_inc(spark, ds)
-
-    # 11. dwd_bound_inbound_inc
-    schema = [
-        ("id", "bigint", "中转记录ID"),
-        ("order_id", "bigint", "运单ID"),
-        ("org_id", "bigint", "机构ID"),
-        ("inbound_time", "string", "入库时间"),
-        ("inbound_emp_id", "bigint", "入库人员"),
-        ("ts", "bigint", "时间戳")
-    ]
-    partition_cols = [("ds", "string", "统计日期")]
-    create_external_table(
-        spark,
-        "dwd_bound_inbound_inc",
-        schema,
-        "/warehouse/tms/dwd/dwd_bound_inbound_inc",
-        partition_cols
-    )
-    etl_dwd_bound_inbound_inc(spark, ds)
-
-    # 12. dwd_bound_sort_inc
-    schema = [
-        ("id", "bigint", "中转记录ID"),
-        ("order_id", "bigint", "订单ID"),
-        ("org_id", "bigint", "机构ID"),
-        ("sort_time", "string", "分拣时间"),
-        ("sorter_emp_id", "bigint", "分拣人员"),
-        ("ts", "bigint", "时间戳")
-    ]
-    partition_cols = [("ds", "string", "统计日期")]
-    create_external_table(
-        spark,
-        "dwd_bound_sort_inc",
-        schema,
-        "/warehouse/tms/dwd/dwd_bound_sort_inc",
-        partition_cols
-    )
-    etl_dwd_bound_sort_inc(spark, ds)
-
-    # 13. dwd_bound_outbound_inc
-    schema = [
-        ("id", "bigint", "中转记录ID"),
-        ("order_id", "bigint", "订单ID"),
-        ("org_id", "bigint", "机构ID"),
-        ("outbound_time", "string", "出库时间"),
-        ("outbound_emp_id", "bigint", "出库人员"),
-        ("ts", "bigint", "时间戳")
-    ]
-    partition_cols = [("ds", "string", "统计日期")]
-    create_external_table(
-        spark,
-        "dwd_bound_outbound_inc",
-        schema,
-        "/warehouse/tms/dwd/dwd_bound_outbound_inc",
-        partition_cols
-    )
-    etl_dwd_bound_outbound_inc(spark, ds)
-
-    print("[SUCCESS] All DWD tables ETL completed for ds={0}".format(ds))
+    print("[SUCCESS] All TMS DWD tables ETL completed for ds={0}".format(partition_date))
+    spark.stop()
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 2:
-        print("Usage: spark-submit tms_dwd_etl.py <partition_date>")
+        print("Usage: spark-submit tms_dwd.py <partition_date>")
         sys.exit(1)
     ds = sys.argv[1]
     main(ds)
