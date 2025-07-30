@@ -2,86 +2,270 @@ set hive.exec.mode.local.auto=True;
 create database aa;
 use aa;
 
--- 创建店铺表
-CREATE TABLE shop_pages (
-      page_id string COMMENT '页面ID',
-      page_type string COMMENT '页面类型（首页、自定义承接页等）',
-      page_name string COMMENT '页面名称',
-      create_time string COMMENT '创建时间',
-      is_active int COMMENT '是否活跃（1-是，0-否）'
-)COMMENT'店铺页面表';
+-- 用户表
+drop table if exists users;
+create external table if not exists users (
+      user_id STRING COMMENT '用户ID',
+      username STRING COMMENT '用户名',
+      gender STRING COMMENT '性别',
+      age INT COMMENT '年龄',
+      city STRING COMMENT '城市',
+      register_time STRING COMMENT '注册时间',
+      credit_score INT COMMENT '信用评分',
+      activity_level STRING COMMENT '活跃度'
+)row format delimited fields terminated by ','
+stored as textfile
+tblproperties ('orc.compress'='SNAPPY');
+load data local inpath '/opt/module/ecommerce_data/users.csv' into table users;
 
--- 创建访问记录表
-CREATE TABLE page_visits (
-      visit_id string COMMENT '访问记录ID',
-      page_id string COMMENT '关联的页面ID',
-      visitor_id string COMMENT '访问者ID',
-      visit_time string COMMENT '访问时间',
-      visit_duration string COMMENT '访问时长（秒）',
-      is_new_visitor string COMMENT '是否新访客（1-是，0-否）',
-      referrer_type string COMMENT '来源类型（如直接访问、搜索、外部链接等）',
-      referrer_value string COMMENT '来源值（如搜索关键词、外部链接URL等）',
-      click_count string COMMENT '点击次数',
-      scroll_depth string COMMENT '页面滚动深度（百分比）',
-      FOREIGN KEY (page_id) REFERENCES shop_pages(page_id)
-) COMMENT'页面访问记录表';
+select * from users;
 
--- 插入模拟店铺页面数据
-INSERT INTO shop_pages (page_type, page_name) VALUES
-      ('首页', '天猫旗舰店首页'),
-      ('自定义承接页', '618大促活动页'),
-      ('自定义承接页', '双11精选商品页'),
-      ('首页', '京东自营店首页'),
-      ('自定义承接页', '新品首发活动页');
+-- 店铺表
+drop table if exists shops;
+create external table if not exists shops (
+      shop_id STRING COMMENT '店铺ID',
+      shop_name STRING COMMENT '店铺名称',
+      shop_type STRING COMMENT '店铺类型',
+      city STRING COMMENT '城市',
+      open_time STRING COMMENT '开业时间',
+      level STRING COMMENT '店铺等级',
+      overall_score DECIMAL(3,1) COMMENT '综合评分',
+      product_score DECIMAL(3,1) COMMENT '商品评分',
+      service_score DECIMAL(3,1) COMMENT '服务评分',
+      logistics_score DECIMAL(3,1) COMMENT '物流评分',
+      followers BIGINT COMMENT '粉丝数',
+      monthly_sales BIGINT COMMENT '月销量',
+      is_premium BOOLEAN COMMENT '是否高级店铺',
+      product_count INT COMMENT '商品数量',
+      promotion_frequency INT COMMENT '促销频率（月）'
+)row format delimited fields terminated by ','
+stored as textfile
+tblproperties ('orc.compress'='SNAPPY');
+load data local inpath '/opt/module/ecommerce_data/shops.csv' into table shops;
 
--- 插入模拟访问记录数据（为简化示例，仅展示部分记录）
-INSERT INTO page_visits (page_id, visitor_id, visit_time, visit_duration, is_new_visitor, referrer_type, referrer_value, click_count, scroll_depth) VALUES
-      (1, 'U1001', '2025-07-28 09:15:30', 120, 1, '搜索引擎', '商品关键词', 5, 75.25),
-      (1, 'U1002', '2025-07-28 10:30:45', 85, 0, '社交媒体', '微信分享', 3, 60.00),
-      (2, 'U1003', '2025-07-28 11:45:10', 210, 1, '外部链接', '淘宝广告', 8, 90.50),
-      (3, 'U1001', '2025-07-28 14:20:15', 150, 0, '直接访问', NULL, 6, 80.75),
-      (4, 'U1004', '2025-07-28 15:30:20', 90, 1, '搜索引擎', '品牌名', 4, 65.20),
-      (2, 'U1005', '2025-07-28 16:45:30', 180, 1, '社交媒体', '微博推广', 7, 85.00);
+select * from shops;
 
--- 查询店铺页面的点击、访问等数据情况（按页面类型统计）
+-- 商品表
+drop table if exists products;
+create external table if not exists products (
+      product_id STRING COMMENT '商品ID',
+      product_name STRING COMMENT '商品名称',
+      category_id STRING COMMENT '分类ID',
+      shop_id STRING COMMENT '店铺ID',
+      price DECIMAL(10,2) COMMENT '价格',
+      inventory INT COMMENT '库存',
+      sales_volume BIGINT COMMENT '销量',
+      create_time STRING COMMENT '创建时间',
+      brand STRING COMMENT '品牌',
+      is_hot BOOLEAN COMMENT '是否热门',
+      is_new BOOLEAN COMMENT '是否新品',
+      discount_rate DECIMAL(3,2) COMMENT '折扣率',
+      rating DECIMAL(3,1) COMMENT '用户评分',
+      category STRING COMMENT '一级分类',
+      sub_category STRING COMMENT '二级分类'
+)row format delimited fields terminated by ','
+stored as textfile
+tblproperties ('orc.compress'='SNAPPY');
+load data local inpath '/opt/module/ecommerce_data/products.csv' into table products;
+
+select * from products;
+
+-- 行为日志表
+drop table if exists behaviors;
+create external table if not exists behaviors (
+      behavior_id STRING COMMENT '行为ID',
+      user_id STRING COMMENT '用户ID',
+      shop_id STRING COMMENT '店铺ID',
+      product_id STRING COMMENT '商品ID',
+      page_type STRING COMMENT '页面类型',
+      behavior_type STRING COMMENT '行为类型',
+      behavior_time STRING COMMENT '行为时间',
+      stay_duration INT COMMENT '停留时长（秒）',
+      platform STRING COMMENT '平台',
+      referrer STRING COMMENT '来源渠道',
+      detail STRING COMMENT '行为详情'
+)row format delimited fields terminated by ','
+stored as textfile
+tblproperties ('orc.compress'='SNAPPY');
+load data local inpath '/opt/module/ecommerce_data/behaviors.csv' into table behaviors;
+
+select page_type from behaviors group by page_type;
+
+
+-- 1. 店铺核心页面访问量（PV）对比
+-- 指标定义：统计周期内，店铺核心页面（店铺首页、店铺分类页、店铺活动页）的访问总次数，用于对比不同入口页面的流量规模。
+-- 业务价值：判断哪个页面是店铺的主要流量入口，为资源分配（如活动页推广）提供依据。
 SELECT
-    sp.page_type,
-    COUNT(DISTINCT pv.visitor_id) AS total_visitors,  -- 总访客数（去重）
-    COUNT(pv.visit_id) AS total_visits,  -- 总访问次数
-    SUM(pv.click_count) AS total_clicks,  -- 总点击次数
-    AVG(pv.visit_duration) AS avg_visit_duration,  -- 平均访问时长
-    SUM(CASE WHEN pv.is_new_visitor = 1 THEN 1 ELSE 0 END) AS new_visitors,  -- 新访客数
-    SUM(CASE WHEN pv.is_new_visitor = 0 THEN 1 ELSE 0 END) AS returning_visitors,  -- 老访客数
-    ROUND(SUM(pv.click_count) / COUNT(pv.visit_id), 2) AS clicks_per_visit,  -- 每次访问平均点击数
-    ROUND(AVG(pv.scroll_depth), 2) AS avg_scroll_depth  -- 平均页面滚动深度
+    page_type,
+    COUNT(*) AS page_views  -- 页面访问量
 FROM
-    shop_pages sp
+    behaviors
+WHERE
+    behavior_time BETWEEN '2023-10-01 00:00:00' AND '2023-10-31 23:59:59'  -- 时间范围
+  AND page_type IN ('店铺首页', '店铺分类页', '店铺活动页')  -- 店铺核心入口页面
+  AND referrer NOT IN ('直播间', '短视频', '图文', '微详情')  -- 排除指定渠道
+GROUP BY
+    page_type
+ORDER BY
+    page_views DESC;  -- 按访问量降序排列
+-- 2. 店铺核心页面到商品详情页的点击率（CTR）
+-- 指标定义：统计周期内，用户从店铺核心页面（店铺首页、店铺分类页、店铺活动页）点击进入商品详情页的比例（点击次数 ÷ 访问量）。
+-- 业务价值：衡量店铺入口页面引导用户查看商品的效率，点击率低的页面需优化商品推荐布局。
+-- 步骤1：统计店铺核心页面的总访问量
+WITH core_page_views AS (
+    SELECT
+        page_type,
+        COUNT(*) AS total_visits
+    FROM
+        behaviors
+    WHERE
+        behavior_time BETWEEN '2023-10-01 00:00:00' AND '2023-10-31 23:59:59'
+      AND page_type IN ('店铺首页', '店铺分类页', '店铺活动页')
+      AND referrer NOT IN ('直播间', '短视频', '图文', '微详情')
+    GROUP BY
+        page_type
+),
+-- 找出从核心页面点击后紧接着访问商品详情页的记录
+     click_to_product AS (
+         SELECT
+             b1.page_type,
+             COUNT(*) AS click_count
+         FROM
+             behaviors b1  -- 当前行为（核心页面的点击）
+                 JOIN
+             behaviors b2  -- 下一个行为（商品详情页的访问）
+             ON
+                         b1.user_id = b2.user_id  -- 同一用户
+                     AND b2.behavior_time > b1.behavior_time  -- 后续行为
+                     AND DATEDIFF(b2.behavior_time, b1.behavior_time) <= 1  -- 限定时间窗口（1天内）
+         WHERE
+             b1.behavior_time BETWEEN '2023-10-01 00:00:00' AND '2023-10-31 23:59:59'
+           AND b1.page_type IN ('店铺首页', '店铺分类页', '店铺活动页')
+           AND b1.behavior_type = '点击'
+           AND b1.referrer NOT IN ('直播间', '短视频', '图文', '微详情')
+           AND b2.page_type = '商品详情页'  -- 目标页面
+         GROUP BY
+             b1.page_type
+     )
+SELECT
+    c.page_type,
+    c.total_visits,
+    COALESCE(p.click_count, 0) AS click_count,
+    ROUND(COALESCE(p.click_count * 100.0 / c.total_visits, 0), 2) AS ctr_percentage
+FROM
+    core_page_views c
         LEFT JOIN
-    page_visits pv ON sp.page_id = pv.page_id
-WHERE
-        sp.is_active = 1  -- 只统计活跃页面
-  AND pv.visit_time >= '2025-07-01'  -- 限制时间范围（示例为7月数据）
-  AND pv.visit_time < '2025-08-01'
-GROUP BY
-    sp.page_type
+    click_to_product p ON c.page_type = p.page_type
 ORDER BY
-    total_visitors DESC;  -- 按访客数降序排列
+    ctr_percentage DESC;
+-- 3. 店铺核心页面跳失率
+-- 指标定义：统计周期内，用户仅访问店铺核心页面（未浏览其他页面）就离开的比例（跳失用户数 ÷ 总访问用户数）。
+-- 业务价值：跳失率高说明页面未满足用户预期（如内容无关、引导不足），需优化页面内容或交互。
+-- 步骤1：统计访问核心页面的所有用户（去重）
+-- WITH core_page_users AS (
+--     SELECT DISTINCT
+--         user_id,
+--         page_type
+--     FROM
+--         behaviors
+--     WHERE
+--         behavior_time BETWEEN '2023-10-01 00:00:00' AND '2023-10-31 23:59:59'
+--       AND page_type IN ('店铺首页', '店铺分类页', '店铺活动页')
+--       AND referrer NOT IN ('直播间', '短视频', '图文', '微详情')
+-- ),
+-- -- 步骤2：统计跳失用户（仅访问核心页面，无其他页面行为）
+--      bounce_users AS (
+--          SELECT
+--              b.user_id,
+--              b.page_type
+--          FROM
+--              behaviors b
+--          WHERE
+--              b.behavior_time BETWEEN '2023-10-01 00:00:00' AND '2023-10-31 23:59:59'
+--            AND b.page_type IN ('店铺首页', '店铺分类页', '店铺活动页')
+--            AND referrer NOT IN ('直播间', '短视频', '图文', '微详情')
+--          GROUP BY
+--              b.user_id,
+--              b.page_type
+--          HAVING
+--             -- 该用户在统计周期内仅访问过当前核心页面，无其他页面行为
+--                  COUNT(DISTINCT b.page_type) = 1
+--             AND NOT EXISTS (
+--              SELECT 1
+--              FROM behaviors b2
+--              WHERE b2.user_id = b.user_id
+--                AND b2.behavior_time BETWEEN '2023-10-01 00:00:00' AND '2023-10-31 23:59:59'
+--                AND b2.page_type NOT IN ('店铺首页', '店铺分类页', '店铺活动页')  -- 其他页面
+--          )
+--      )
+-- -- 步骤3：计算跳失率（保留2位小数）
+-- SELECT
+--     c.page_type,
+--     COUNT(DISTINCT c.user_id) AS total_users,  -- 总访问用户数
+--     COUNT(DISTINCT b.user_id) AS bounce_users,  -- 跳失用户数
+--     ROUND(COUNT(DISTINCT b.user_id) * 100.0 / COUNT(DISTINCT c.user_id), 2) AS bounce_rate_percentage
+-- FROM
+--     core_page_users c
+--         LEFT JOIN
+--     bounce_users b ON c.user_id = b.user_id AND c.page_type = b.page_type
+-- GROUP BY
+--     c.page_type
+-- ORDER BY
+--     bounce_rate_percentage DESC;
+-- 优化方案
+-- 使用 窗口函数 和 CTE 预聚合 减少表扫描次数，避免子查询中的全表关联：
 
--- 查询特定页面的详细访问数据（示例：查询ID为2的自定义承接页）
+-- 预计算用户的页面访问统计信息
+WITH user_page_stats AS (
+    SELECT
+        user_id,
+        COUNT(DISTINCT page_type) AS visited_page_types,
+        MAX(CASE WHEN page_type IN ('店铺首页', '店铺分类页', '店铺活动页') THEN 1 ELSE 0 END) AS visited_core_pages,
+        MAX(CASE WHEN page_type NOT IN ('店铺首页', '店铺分类页', '店铺活动页') THEN 1 ELSE 0 END) AS visited_other_pages
+    FROM
+        behaviors
+    WHERE
+        behavior_time BETWEEN '2023-10-01 00:00:00' AND '2023-10-31 23:59:59'
+      AND referrer NOT IN ('直播间', '短视频', '图文', '微详情')
+    GROUP BY
+        user_id
+),
+-- 标记跳失用户（仅访问核心页面且未访问其他页面）
+     bounce_users AS (
+         SELECT
+             user_id
+         FROM
+             user_page_stats
+         WHERE
+                 visited_core_pages = 1      -- 访问过核心页面
+           AND visited_other_pages = 0 -- 未访问过其他页面
+           AND visited_page_types = 1  -- 仅访问了1种页面类型
+     ),
+-- 统计各页面的访问用户（去重）
+     page_visitors AS (
+         SELECT
+             page_type,
+             user_id
+         FROM
+             behaviors
+         WHERE
+             behavior_time BETWEEN '2023-10-01 00:00:00' AND '2023-10-31 23:59:59'
+           AND page_type IN ('店铺首页', '店铺分类页', '店铺活动页')
+           AND referrer NOT IN ('直播间', '短视频', '图文', '微详情')
+         GROUP BY
+             page_type, user_id  -- 确保每个用户在每个页面只计一次
+     )
+-- 计算跳失率
 SELECT
-    DATE(pv.visit_time) AS visit_date,
-    COUNT(DISTINCT pv.visitor_id) AS daily_visitors,
-    COUNT(pv.visit_id) AS daily_visits,
-    SUM(pv.click_count) AS daily_clicks,
-    AVG(pv.visit_duration) AS avg_daily_duration,
-    ROUND(AVG(pv.scroll_depth), 2) AS avg_daily_scroll
+    p.page_type,
+    COUNT(p.user_id) AS total_users,
+    COUNT(CASE WHEN b.user_id IS NOT NULL THEN 1 END) AS bounce_users,
+    ROUND(COUNT(CASE WHEN b.user_id IS NOT NULL THEN 1 END) * 100.0 / COUNT(p.user_id), 2) AS bounce_rate_percentage
 FROM
-    page_visits pv
-WHERE
-        pv.page_id = 2  -- 特定页面ID
-  AND pv.visit_time >= '2025-07-01'
-  AND pv.visit_time < '2025-08-01'
+    page_visitors p
+        LEFT JOIN
+    bounce_users b ON p.user_id = b.user_id
 GROUP BY
-    DATE(pv.visit_time)
+    p.page_type
 ORDER BY
-    visit_date ASC;  -- 按日期升序排列
+    bounce_rate_percentage DESC;
