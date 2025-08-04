@@ -87,7 +87,7 @@ SELECT
     -- 转换为年月日格式（yyyy-MM-dd）
     to_date(current_timestamp()) as update_time  -- 仅保留年月日
 FROM ods_products
-WHERE ds = '20250731';
+WHERE ds = '20250731' ;
 
 select * from dim_products;
 
