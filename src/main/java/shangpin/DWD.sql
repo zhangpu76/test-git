@@ -453,10 +453,12 @@ SELECT
     cast(eval_score as INT) as eval_score,
     -- 评价等级
     case
-        when cast(eval_score as INT) = 5 then '非常好'
-        when cast(eval_score as INT) = 4 then '好'
-        when cast(eval_score as INT) = 3 then '一般'
-        when cast(eval_score as INT) = 2 then '差'
+        when cast(eval_score as INT) = 7 then '非常好'
+        when cast(eval_score as INT) = 6 then '很好'
+        when cast(eval_score as INT) = 5 then '好'
+        when cast(eval_score as INT) = 4 then '一般'
+        when cast(eval_score as INT) = 3 then '非常差'
+        when cast(eval_score as INT) = 2 then '很差'
         when cast(eval_score as INT) = 1 then '非常差'
         else '无评分'
         end as eval_level,
@@ -473,4 +475,4 @@ SELECT
 FROM ods_fact_user_review
 WHERE ds = '20250808';
 
-select * from dwd_fact_user_review_detail;
+select eval_content from dwd_fact_user_review_detail group by eval_content;
