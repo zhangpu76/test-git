@@ -1,0 +1,13 @@
+<component name="libraryTable">
+  <library name="Maven: org.apache.hive:hive-llap-client:2.3.7">
+    <CLASSES>
+      <root url="jar://$PROJECT_DIR$/../../../zp/apache-maven-3.8.3/repository/org/apache/hive/hive-llap-client/2.3.7/hive-llap-client-2.3.7.jar!/" />
+    </CLASSES>
+    <JAVADOC>
+      <root url="jar://$PROJECT_DIR$/../../../zp/apache-maven-3.8.3/repository/org/apache/hive/hive-llap-client/2.3.7/hive-llap-client-2.3.7-javadoc.jar!/" />
+    </JAVADOC>
+    <SOURCES>
+      <root url="jar://$PROJECT_DIR$/../../../zp/apache-maven-3.8.3/repository/org/apache/hive/hive-llap-client/2.3.7/hive-llap-client-2.3.7-sources.jar!/" />
+    </SOURCES>
+  </library>
+</component>
