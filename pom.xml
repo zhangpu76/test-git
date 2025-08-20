@@ -9,8 +9,8 @@
     <packaging>pom</packaging>
     <version>1.0-SNAPSHOT</version>
     <modules>
-        <module>stream_realtime</module>
-        <module>stream_common</module>
+        <module>stream-common</module>
+        <module>stream-realtime</module>
     </modules>
 
     <properties>
@@ -35,21 +35,6 @@
 
     <dependencyManagement>
         <dependencies>
-            <!-- Hadoop依赖 -->
-            <dependency>
-                <groupId>org.apache.hadoop</groupId>
-                <artifactId>hadoop-client</artifactId>
-                <version>3.3.4</version>
-                <!-- 本地运行时去掉provided，确保依赖被打包到classpath -->
-                <!-- <scope>provided</scope> -->
-            </dependency>
-            <dependency>
-                <groupId>org.apache.hadoop</groupId>
-                <artifactId>hadoop-hdfs</artifactId>
-                <version>3.3.4</version>
-                <!-- 同样去掉provided -->
-                <!-- <scope>provided</scope> -->
-            </dependency>
             <!-- flink 相关依赖 开始 -->
 
             <dependency>
@@ -175,18 +160,23 @@
             <!-- flink 相关依赖 结束 -->
 
             <!-- hadoop 相关依赖 开发 -->
+            <!-- Hadoop 公共依赖 -->
             <dependency>
                 <groupId>org.apache.hadoop</groupId>
                 <artifactId>hadoop-common</artifactId>
-                <version>${hadoop.version}</version>
+                <version>3.3.4</version>
             </dependency>
-
-            <!--如果保存检查点到hdfs上，需要引入此依赖-->
+            <!-- HDFS 核心依赖 -->
+            <dependency>
+                <groupId>org.apache.hadoop</groupId>
+                <artifactId>hadoop-hdfs</artifactId>
+                <version>3.3.4</version>
+            </dependency>
+            <!-- Hadoop 客户端依赖 -->
             <dependency>
                 <groupId>org.apache.hadoop</groupId>
                 <artifactId>hadoop-client</artifactId>
-                <version>${hadoop.version}</version>
-                <!--                <scope>provided</scope>-->
+                <version>3.3.4</version>
             </dependency>
 
             <dependency>
@@ -200,6 +190,8 @@
                     </exclusion>
                 </exclusions>
             </dependency>
+
+
             <!-- hadoop 相关依赖 结束 -->
 
 
@@ -280,20 +272,29 @@
                 <version>1.10.0</version>
             </dependency>
 
-<!--            <dependency>-->
-<!--                <groupId>org.apache.flink</groupId>-->
-<!--                <artifactId>flink-parquet</artifactId>-->
-<!--                <version>1.8.0</version>-->
-<!--            </dependency>-->
+            <dependency>
+                <groupId>org.apache.flink</groupId>
+                <artifactId>flink-statebackend-rocksdb</artifactId>
+                <version>${flink.version}</version>
+                <!-- 若为生产环境，建议去掉 scope，确保依赖被打包 -->
+                <!-- <scope>provided</scope> -->
+            </dependency>
+            <!--            <dependency>-->
+            <!--                <groupId>org.apache.flink</groupId>-->
+            <!--                <artifactId>flink-parquet</artifactId>-->
+            <!--                <version>1.8.0</version>-->
+            <!--            </dependency>-->
             <!-- parquet 文件格式相关依赖 结束 -->
 
             <!-- mysql 相关依赖 开始 -->
 
-<!--            <dependency>-->
-<!--                <groupId>commons-dbutils</groupId>-->
-<!--                <artifactId>commons-dbutils</artifactId>-->
-<!--                <version>1.7</version>-->
-<!--            </dependency>-->
+
+
+            <!--            <dependency>-->
+            <!--                <groupId>commons-dbutils</groupId>-->
+            <!--                <artifactId>commons-dbutils</artifactId>-->
+            <!--                <version>1.7</version>-->
+            <!--            </dependency>-->
 
             <!-- mysql 相关依赖 结束 -->
         </dependencies>
@@ -352,6 +353,13 @@
         </plugins>
         <!--负责处理项目资源文件并拷贝到输出目录-->
         <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <includes>
+                    <include>** /*.properties</include> <!-- 确保properties文件被包含 -->
+                    <include>** /*.xml</include> <!-- 如需其他资源可添加 -->
+                </includes>
+            </resource>
             <resource>
                 <directory>src/main/resources/</directory>
                 <targetPath>./</targetPath>

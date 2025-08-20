@@ -4,6 +4,7 @@
     <modules>
       <module fileurl="file://$PROJECT_DIR$/offline-pyspark/offline-pyspark.iml" filepath="$PROJECT_DIR$/offline-pyspark/offline-pyspark.iml" />
       <module fileurl="file://$PROJECT_DIR$/stream-common.iml" filepath="$PROJECT_DIR$/stream-common.iml" />
+      <module fileurl="file://$PROJECT_DIR$/stream_realtime.iml" filepath="$PROJECT_DIR$/stream_realtime.iml" />
     </modules>
   </component>
 </project>

@@ -10,13 +10,10 @@ import org.apache.hadoop.hbase.client.*;
 import org.apache.hadoop.hbase.filter.FirstKeyOnlyFilter;
 import org.apache.hadoop.hbase.io.compress.Compression;
 import org.apache.hadoop.hbase.util.Bytes;
-import org.apache.kafka.clients.admin.Admin;
-import org.rocksdb.ColumnFamilyDescriptor;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
-import java.sql.Connection;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Iterator;
@@ -43,7 +40,7 @@ public class HbaseUtils {
         entries.set("hbase.incremental.wal","true");
         entries.set(HConstants.HBASE_CLIENT_SCANNER_TIMEOUT_PERIOD,"3600000");
 //        entries.set(HConstants.HBASE_REGIONSERVER_LEASE_PERIOD_KEY,"1200000");
-        this.connection = (Connection) ConnectionFactory.createConnection(entries);
+        this.connection = ConnectionFactory.createConnection(entries);
     }
 
     public Connection getConnection() {
@@ -74,14 +71,14 @@ public class HbaseUtils {
         TableDescriptorBuilder tableDescriptorBuilder = TableDescriptorBuilder.newBuilder(TableName.valueOf(nameSpace,tableName));
         if (columnFamily.length > 0) {
             for (String s : columnFamily) {
-                ColumnFamilyDescriptor build = (ColumnFamilyDescriptor) ColumnFamilyDescriptorBuilder.newBuilder(s.getBytes()).setCompressionType(Compression.Algorithm.SNAPPY).build();
+                ColumnFamilyDescriptor build = ColumnFamilyDescriptorBuilder.newBuilder(s.getBytes()).setCompressionType(Compression.Algorithm.SNAPPY).build();
                 System.err.println("构建表列族：" + s);
                 tableDescriptorBuilder.setColumnFamily(build);
             }
         } else {
-            ColumnFamilyDescriptor build = (ColumnFamilyDescriptor) ColumnFamilyDescriptorBuilder.newBuilder("info".getBytes()).setCompressionType(Compression.Algorithm.SNAPPY).build();
+            ColumnFamilyDescriptor build = ColumnFamilyDescriptorBuilder.newBuilder("info".getBytes()).setCompressionType(Compression.Algorithm.SNAPPY).build();
             System.err.println("构建表列族：info");
-            tableDescriptorBuilder.setColumnFamily((org.apache.hadoop.hbase.client.ColumnFamilyDescriptor) build);
+            tableDescriptorBuilder.setColumnFamily(build);
         }
         TableDescriptor build = tableDescriptorBuilder
                 .build();
